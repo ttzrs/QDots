@@ -1,0 +1,42 @@
+# QDots VQE con aceleración GPU
+# Usa PennyLane Lightning.GPU (cuQuantum) - bien mantenido y compatible
+
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Dependencias del sistema
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python 3.11 como default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# Pip actualizado
+RUN python3 -m pip install --upgrade pip setuptools wheel
+
+# PennyLane con backend GPU (Lightning.GPU usa cuQuantum)
+RUN pip install pennylane pennylane-lightning-gpu
+
+# Química cuántica
+RUN pip install pyscf numpy scipy
+
+# Directorio de trabajo
+WORKDIR /app
+COPY *.py /app/
+COPY proyecto.txt /app/
+
+# Script de entrada
+RUN echo '#!/bin/bash\n\
+echo "=== QDots VQE con GPU (PennyLane Lightning.GPU) ===" \n\
+nvidia-smi --query-gpu=name,memory.free --format=csv,noheader 2>/dev/null || echo "GPU info not available"\n\
+echo "" \n\
+python3 "$@"' > /app/run_gpu.sh && chmod +x /app/run_gpu.sh
+
+ENTRYPOINT ["/app/run_gpu.sh"]
+CMD ["qdot_vqe_pennylane.py"]

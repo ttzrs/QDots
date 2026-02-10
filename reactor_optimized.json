@@ -1,0 +1,39 @@
+{
+  "units": "mm",
+  "chamber": {
+    "type": "serpentine",
+    "channel_width": 3.0,
+    "channel_height": 1.0,
+    "channel_length": 250.0,
+    "wall_thickness": 2.0,
+    "n_turns": 6,
+    "turn_radius": 4.5
+  },
+  "electrodes": {
+    "config": "embedded_walls",
+    "width": 1.5,
+    "gap": 1.0,
+    "thickness": 0.1,
+    "material": "copper"
+  },
+  "dielectric": {
+    "material": "resin_high_temp",
+    "thickness": 0.8
+  },
+  "connections": {
+    "inlet_diameter": 2.0,
+    "outlet_diameter": 2.0,
+    "gas_inlet_diameter": 1.5
+  },
+  "cooling": {
+    "required": true,
+    "serpentine_length": 150.0,
+    "serpentine_diameter": 3.0
+  },
+  "performance": {
+    "estimated_production_mg_h": 30.505287825735422,
+    "estimated_wavelength_nm": 462.5712527870647,
+    "estimated_size_nm": 2.4797300000000004,
+    "power_w": 9.2664
+  }
+}

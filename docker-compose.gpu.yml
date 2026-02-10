@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  qdots-vqe-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: qdots-vqe-gpu:latest
+    container_name: qdots-vqe
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - QULACS_USE_GPU=1
+    volumes:
+      - .:/app:ro
+      - ./results:/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["qdot_vqe_gpu.py"]

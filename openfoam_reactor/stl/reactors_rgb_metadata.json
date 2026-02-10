@@ -1,0 +1,77 @@
+{
+  "reactors": {
+    "blue": {
+      "body": "/var/home/joss/Datos/Proyectos/QDots/openfoam_reactor/stl/Reactor_Blue_447nm_body.stl",
+      "channels": "/var/home/joss/Datos/Proyectos/QDots/openfoam_reactor/stl/Reactor_Blue_447nm_channels.stl",
+      "electrodes": "/var/home/joss/Datos/Proyectos/QDots/openfoam_reactor/stl/Reactor_Blue_447nm_electrodes.stl",
+      "dimensions": {
+        "width": 24.4,
+        "length": 87.0,
+        "height": 6.5
+      },
+      "params": {
+        "name": "Reactor_Blue_447nm",
+        "wavelength": 447,
+        "channel_width": 1.6,
+        "channel_height": 2.5,
+        "channel_length": 83,
+        "n_turns": 4,
+        "wall_thickness": 2.0,
+        "electrode_width": 2.06,
+        "electrode_gap": 1.69,
+        "electrode_coverage": 0.72
+      }
+    },
+    "green": {
+      "body": "/var/home/joss/Datos/Proyectos/QDots/openfoam_reactor/stl/Reactor_Green_528nm_body.stl",
+      "channels": "/var/home/joss/Datos/Proyectos/QDots/openfoam_reactor/stl/Reactor_Green_528nm_channels.stl",
+      "electrodes": "/var/home/joss/Datos/Proyectos/QDots/openfoam_reactor/stl/Reactor_Green_528nm_electrodes.stl",
+      "dimensions": {
+        "width": 24.8,
+        "length": 119.0,
+        "height": 6.2
+      },
+      "params": {
+        "name": "Reactor_Green_528nm",
+        "wavelength": 528,
+        "channel_width": 1.7,
+        "channel_height": 2.2,
+        "channel_length": 115,
+        "n_turns": 4,
+        "wall_thickness": 2.0,
+        "electrode_width": 1.9,
+        "electrode_gap": 1.8,
+        "electrode_coverage": 0.7
+      }
+    },
+    "red": {
+      "body": "/var/home/joss/Datos/Proyectos/QDots/openfoam_reactor/stl/Reactor_Red_621nm_body.stl",
+      "channels": "/var/home/joss/Datos/Proyectos/QDots/openfoam_reactor/stl/Reactor_Red_621nm_channels.stl",
+      "electrodes": "/var/home/joss/Datos/Proyectos/QDots/openfoam_reactor/stl/Reactor_Red_621nm_electrodes.stl",
+      "dimensions": {
+        "width": 32.0,
+        "length": 124.0,
+        "height": 5.5
+      },
+      "params": {
+        "name": "Reactor_Red_621nm",
+        "wavelength": 621,
+        "channel_width": 2.0,
+        "channel_height": 1.5,
+        "channel_length": 120,
+        "n_turns": 5,
+        "wall_thickness": 2.0,
+        "electrode_width": 1.86,
+        "electrode_gap": 2.0,
+        "electrode_coverage": 0.73
+      }
+    }
+  },
+  "units": "mm",
+  "coordinate_system": "right-handed, Z-up",
+  "notes": {
+    "body": "Cuerpo exterior del reactor (para impresi\u00f3n 3D)",
+    "channels": "Geometr\u00eda interna del canal (dominio fluido para CFD)",
+    "electrodes": "Ranuras para insertar electrodos DBD"
+  }
+}

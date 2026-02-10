@@ -1,0 +1,90 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  11
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "constant/polyMesh";
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+// Reactor DBD - Canal equivalente
+// Parámetros: W=3.0mm, H=1.0mm, L=250.0mm
+
+scale   1;
+
+vertices
+(
+    // Cara inferior (z=0)
+    (0      0      0)       // 0
+    (0.250000 0      0)       // 1
+    (0.250000 0.003000 0)       // 2
+    (0      0.003000 0)       // 3
+
+    // Cara superior (z=h)
+    (0      0      0.001000)  // 4
+    (0.250000 0      0.001000)  // 5
+    (0.250000 0.003000 0.001000)  // 6
+    (0      0.003000 0.001000)  // 7
+);
+
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) (833 10 5) simpleGrading (1.0 1.0 1.0)
+);
+
+boundary
+(
+    inlet
+    {
+        type patch;
+        faces
+        (
+            (0 4 7 3)
+        );
+    }
+
+    outlet
+    {
+        type patch;
+        faces
+        (
+            (1 2 6 5)
+        );
+    }
+
+    walls
+    {
+        type wall;
+        faces
+        (
+            (0 1 5 4)   // bottom-front
+            (3 7 6 2)   // top-back
+        );
+    }
+
+    electrode_top
+    {
+        type wall;
+        faces
+        (
+            (4 5 6 7)   // top (electrode zone)
+        );
+    }
+
+    electrode_bottom
+    {
+        type wall;
+        faces
+        (
+            (0 3 2 1)   // bottom (electrode zone)
+        );
+    }
+);
+
+// ************************************************************************* //

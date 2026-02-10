@@ -1,0 +1,42 @@
+# Large binary files (root level)
+*.stl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+*.so
+.venv/
+venv/
+env/
+
+# Cache
+chem_backend/cache/
+
+# OpenFOAM simulation data (temp cases, time steps, exports)
+openfoam_reactor/temp_case_*/
+openfoam_reactor/44/
+openfoam_reactor/postProcessing/
+openfoam_reactor/data_export/
+openfoam_reactor/data_export_complete/
+openfoam_reactor/data_export_full/
+openfoam_reactor/bayesian_opt/
+openfoam_reactor/pinn_training/
+openfoam_reactor/quality_optimization/
+
+# Keep OpenFOAM config and scripts (0/, constant/, system/, scripts/, stl/)
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
