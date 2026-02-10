@@ -35,5 +35,43 @@
     "estimated_wavelength_nm": 462.5712527870647,
     "estimated_size_nm": 2.4797300000000004,
     "power_w": 9.2664
+  },
+  "classifier": {
+    "n_stages": 5,
+    "channel_width": 2.0,
+    "channel_height": 1.0,
+    "wall_thickness": 2.0,
+    "stage_pitch": 25.0,
+    "membrane_diameter": 13.0,
+    "membrane_seat_depth": 0.5,
+    "membranes": [
+      {"stage": 0, "pore_nm": 10000, "type": "track_etched", "material": "polycarbonate"},
+      {"stage": 1, "pore_nm": 5000, "type": "track_etched", "material": "polycarbonate"},
+      {"stage": 2, "pore_nm": 20, "type": "anodic_alumina", "material": "alumina"},
+      {"stage": 3, "pore_nm": 13, "type": "anodic_alumina", "material": "alumina"},
+      {"stage": 4, "pore_nm": 3, "type": "ultrafiltration", "material": "ceramic"}
+    ],
+    "chambers": {
+      "width": 10.0,
+      "length": 15.0,
+      "depth": 5.0
+    },
+    "optics": {
+      "window_diameter": 8.0,
+      "window_thickness": 1.0,
+      "led_type": "blue_led_405",
+      "led_diameter": 5.0,
+      "detector_diameter": 5.0
+    },
+    "connections": {
+      "inlet_diameter": 2.0,
+      "outlet_diameter": 1.5,
+      "waste_diameter": 2.0
+    },
+    "performance": {
+      "estimated_recovery": 0.0,
+      "estimated_purity": 0.0,
+      "total_pressure_drop_bar": 0.0
+    }
   }
 }

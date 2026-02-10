@@ -9,10 +9,11 @@ El sistema convierte materia orgánica residual (purines) en nanomateriales fluo
 La clave es que **ningún parámetro se elige por ensayo y error**: cada decisión de diseño (geometría del canal, voltaje, tiempo de residencia, setpoint del sensor) se deriva de simulaciones cuánticas (VQE) y fluidodinámicas (CFD) previas.
 
 ```
-Purín → [Pre-tratamiento] → [Reactor DBD] → [Sensor óptico] → [Válvula selectiva]
-                                    ↑                              ↓
-                              Gemelo Digital              Producto / Descarte
-                           (Tangelo + OpenFOAM)
+Purín → [Pre-tratamiento] → [Reactor DBD] → [Clasificador Laberinto] → Producto
+                                    ↑              │                       ↑
+                              Gemelo Digital   5 etapas membrana    Discriminación PL
+                           (Tangelo + OpenFOAM)    ↓                  (UV LED 405nm)
+                                              Tamaño → Fluorescencia → QDots puros
 ```
 
 ## Arquitectura
@@ -66,11 +67,37 @@ openfoam_reactor/
 └── run_openfoam.sh
 ```
 
-### 4. Control y Operación
+### 4. Clasificador de Laberinto (Post-reactor)
+
+Sistema de separación en dos etapas: clasificación por tamaño mediante membranas en cascada, seguida de discriminación por fotoluminiscencia para aislar QDots de partículas no-fluorescentes.
+
+```
+Reactor → [10μm] → [5μm] → [20nm AAO] → [13nm AAO] → [3nm UF] → Residuo
+            ↓         ↓         ↓              ↓            ↓
+         Debris    Agregados  QDots rojos  QDots azules  QDots UV
+                               ↓ UV LED      ↓ UV LED     ↓ UV LED
+                              ¿Fluoresce?   ¿Fluoresce?  ¿Fluoresce?
+                              Sí→Producto   Sí→PRODUCTO  Sí→Producto
+                              No→Descarte   No→Descarte  No→Descarte
+```
 
 | Script | Descripción |
 |--------|-------------|
-| `reactor_control.py` | Bucle de control sensor-válvula en tiempo real |
+| `classifier_design.py` | Diseño paramétrico del laberinto (membranas, PL, eficiencia) |
+| `classifier_3d_cadquery.py` | Modelo 3D CadQuery (cuerpo + tapa removible) |
+| `classifier_3d.scad` | Modelo 3D OpenSCAD con visualización |
+
+**Especificaciones del clasificador:**
+- 5 etapas: Nuclepore 10μm/5μm + Anodisc AAO 20nm/13nm + UF cerámica 3nm
+- Cámaras con ventana de cuarzo + LED UV 405nm + fotodetector a 90°
+- Tapa removible con tornillos M3 para cambio de membranas
+- Recuperación estimada: **~80%**, Pureza: **~99%**
+
+### 5. Control y Operación
+
+| Script | Descripción |
+|--------|-------------|
+| `reactor_control.py` | Control del reactor + clasificador (ReactorController + ClassifierController) |
 | `qdot_final.py` | Integración completa del sistema |
 
 ## Uso
@@ -84,6 +111,14 @@ python qdot_vqe.py
 
 # Optimizar diseño del reactor
 python reactor_design.py --optimize --production-target 100
+
+# Diseñar clasificador de laberinto
+python classifier_design.py --design
+python classifier_design.py --optimize
+python classifier_design.py --export-cad classifier_params.json
+
+# Vista previa 3D del clasificador
+python classifier_3d_cadquery.py --preview
 
 # Simulación CFD
 cd openfoam_reactor && ./run_openfoam.sh
@@ -109,10 +144,11 @@ docker compose -f docker-compose.gpu.yml up
 | Componente | Estado | Siguiente paso |
 |:-----------|:------:|:---------------|
 | Simulación VQE | Completada | Validar con clústeres de 24+ qubits en GPU |
-| Diseño CAD | Optimizado | Imprimir en resina de alta temperatura |
+| Diseño CAD reactor | Optimizado | Imprimir en resina de alta temperatura |
 | Simulación CFD | Validada | Verificar con fluidos no-newtonianos |
-| Lógica de control | Implementada | Conectar a actuadores físicos |
-| Hardware | Pendiente | Fabricar reactor e integrar electrónica |
+| Clasificador laberinto | Diseñado | Integrar CFD del clasificador, imprimir prototipo |
+| Lógica de control | Implementada | Conectar a actuadores físicos (reactor + clasificador) |
+| Hardware | Pendiente | Fabricar reactor + clasificador e integrar electrónica |
 
 ## Licencia
 
