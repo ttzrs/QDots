@@ -21,9 +21,9 @@
       "inlet": {
         "temperature_K": 298.15,
         "electric_field_kV_cm": 0.0,
-        "gap_eV": 2.657296763920888,
-        "size_nm": 2.5046436266360494,
-        "wavelength_nm": 466.6396380095531,
+        "gap_eV": 2.663757614680174,
+        "size_nm": 2.497681416173761,
+        "wavelength_nm": 465.50781991809777,
         "method": "tangelo_vqe",
         "confidence": 0.8,
         "activation_energies": {
@@ -38,9 +38,9 @@
       "plasma_zone": {
         "temperature_K": 333.15,
         "electric_field_kV_cm": 5.0,
-        "gap_eV": 2.640642342524493,
-        "size_nm": 2.522862408718329,
-        "wavelength_nm": 469.5827147930006,
+        "gap_eV": 2.6274374438913126,
+        "size_nm": 2.5375936752945596,
+        "wavelength_nm": 471.9427299336662,
         "method": "tangelo_vqe",
         "confidence": 0.8,
         "activation_energies": {
@@ -55,9 +55,9 @@
       "plasma_high_E": {
         "temperature_K": 333.15,
         "electric_field_kV_cm": 10.0,
-        "gap_eV": 2.5768661904315358,
-        "size_nm": 2.5964946935960396,
-        "wavelength_nm": 481.204652614245,
+        "gap_eV": 2.629216101098545,
+        "size_nm": 2.5355943732954285,
+        "wavelength_nm": 471.62346202044796,
         "method": "tangelo_vqe",
         "confidence": 0.8,
         "activation_energies": {
@@ -72,9 +72,9 @@
       "outlet": {
         "temperature_K": 323.15,
         "electric_field_kV_cm": 0.0,
-        "gap_eV": 2.7145806185864956,
-        "size_nm": 2.444866427996736,
-        "wavelength_nm": 456.7924752390217,
+        "gap_eV": 2.6359827371044036,
+        "size_nm": 2.528031287094359,
+        "wavelength_nm": 470.412792369849,
         "method": "tangelo_vqe",
         "confidence": 0.8,
         "activation_energies": {
@@ -88,10 +88,10 @@
       }
     },
     "kinetics_valid": true,
-    "gap_consistency_pct": 0.7874082309703578,
-    "plasma_zone_gap_eV": 2.640642342524493,
-    "plasma_zone_size_nm": 2.522862408718329,
-    "plasma_zone_lambda_nm": 469.5827147930006
+    "gap_consistency_pct": 1.2835345697583163,
+    "plasma_zone_gap_eV": 2.6274374438913126,
+    "plasma_zone_size_nm": 2.5375936752945596,
+    "plasma_zone_lambda_nm": 471.9427299336662
   },
   "production": {
     "all_valid": false,
