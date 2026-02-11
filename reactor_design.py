@@ -155,6 +155,26 @@ MATERIALS = {
         printable_3d=True,
         cost_relative=2.5
     ),
+    "tio2_anatase_porous": Material(
+        name="TiO₂ Anatase Poroso",
+        dielectric_constant=40.0,      # Anatase: 31-48 (poroso reduce)
+        dielectric_strength=4e6,       # Menor por porosidad
+        thermal_conductivity=4.0,      # Reducido por porosidad (~8.5 denso)
+        max_temperature=1200,
+        chemical_resistance=True,
+        printable_3d=True,             # Extrusión cerámica / sol-gel + molde
+        cost_relative=4.0
+    ),
+    "tio2_rutile_porous": Material(
+        name="TiO₂ Rutilo Poroso",
+        dielectric_constant=85.0,      # Rutilo: 86-170 (poroso reduce)
+        dielectric_strength=5e6,
+        thermal_conductivity=5.0,
+        max_temperature=1800,
+        chemical_resistance=True,
+        printable_3d=True,
+        cost_relative=4.5
+    ),
 }
 
 
@@ -178,6 +198,13 @@ class ReactorParameters:
     # Materiales
     dielectric_material: str = "ceramic_resin"
     electrode_material: str = "copper"  # Cu, Al, acero inoxidable
+
+    # Catalizador
+    catalyst_type: Optional[str] = None          # None, "tio2_anatase", "tio2_rutile"
+    catalyst_porosity: float = 0.60              # Porosidad (0-1), típico 0.4-0.7
+    catalyst_surface_area_m2_g: float = 50.0     # Área BET (m²/g), 50-200 típico
+    catalyst_thickness_mm: float = 0.5           # Espesor de capa catalítica
+    catalyst_loading_mg_cm2: float = 2.0         # Carga de TiO2 por cm²
 
     # Parámetros eléctricos
     voltage_kv: float = 10.0            # Voltaje aplicado
@@ -368,6 +395,81 @@ class ReactorDesigner:
             'gas_gap_mm': gas_gap_mm,
         }
 
+    def calculate_catalyst_effect(self, geometry: Dict, electrical: Dict) -> Dict:
+        """
+        Calcula efecto sinérgico plasma-TiO2.
+
+        Sinergia plasma-TiO2:
+        1. UV del plasma (λ < 388nm para anatase, < 413nm para rutile)
+           excita TiO2 → pares e⁻/h⁺
+        2. Radicales reactivos: OH•, O•, O₂⁻ atacan precursor
+        3. Superficie porosa provee sitios de nucleación → CQDs
+
+        De literatura:
+        - Plasma-TiO2 sinergia: 1.5-3x mejora vs plasma solo
+        - Nucleación en superficie: +0.05-0.15 monodispersidad
+        - Degradación: ~5% por hora de operación (fouling)
+        - Regeneración: 400°C por 1h restaura >95%
+        """
+        if not self.params.catalyst_type:
+            return {
+                'conversion_factor': 1.0,
+                'monodispersity_boost': 0.0,
+                'size_shift_nm': 0.0,
+                'cat_area_m2': 0.0,
+                'fouling_rate_per_h': 0.0,
+                'regeneration_temp_C': 0,
+                'regeneration_time_h': 0.0,
+            }
+
+        # Área reactiva total
+        loading = self.params.catalyst_loading_mg_cm2
+        porosity = self.params.catalyst_porosity
+        bet_area = self.params.catalyst_surface_area_m2_g
+        plasma_area = geometry['interface_area_cm2']
+
+        # Área catalítica real = carga × área_BET × porosidad_accesible
+        cat_area_m2 = (loading * 1e-3) * bet_area * porosity * (plasma_area * 1e-4)
+        # Normalizar a área de referencia (1 cm² de TiO2 denso)
+        cat_area_factor = min(5.0, cat_area_m2 / 1e-4)
+
+        # Factor de activación UV
+        # Plasma DBD emite UV fuerte (200-400 nm)
+        # Anatase: bandgap 3.2 eV (λ < 388 nm) - mejor fotocatálisis
+        # Rutile: bandgap 3.0 eV (λ < 413 nm) - más estable
+        if 'anatase' in self.params.catalyst_type:
+            uv_factor = 1.8   # Más activo bajo UV
+        else:
+            uv_factor = 1.4   # Rutile: más estable, menos activo
+
+        # Factor de energía: más energía = más UV = más activación
+        E = electrical['energy_density_j_ml']
+        energy_activation = min(2.0, E / 300)
+
+        # Conversión total
+        conversion_factor = 1.0 + (uv_factor - 1.0) * cat_area_factor * energy_activation
+        conversion_factor = min(3.5, conversion_factor)  # Cap físico
+
+        # Monodispersidad: nucleación heterogénea en superficie
+        mono_boost = 0.05 * porosity * min(1.0, cat_area_factor)
+
+        # Tamaño: nucleación en superficie favorece partículas más pequeñas
+        size_shift_nm = -0.2 * min(1.0, cat_area_factor)
+
+        # Fouling: degradación por horas de operación continua
+        # Regenerable con calentamiento a 400°C
+        fouling_rate_per_h = 0.05  # 5% por hora
+
+        return {
+            'conversion_factor': conversion_factor,
+            'monodispersity_boost': mono_boost,
+            'size_shift_nm': size_shift_nm,
+            'cat_area_m2': cat_area_m2,
+            'fouling_rate_per_h': fouling_rate_per_h,
+            'regeneration_temp_C': 400,
+            'regeneration_time_h': 1.0,
+        }
+
     def calculate_production(self, geometry: Dict, flow: Dict, electrical: Dict) -> Dict:
         """Estima producción de CQDs basado en modelo cinético"""
         p = self.params
@@ -400,8 +502,12 @@ class ReactorDesigner:
         # Factor de área de contacto plasma-líquido
         area_factor = min(2.0, geometry['interface_area_cm2'] / 5)
 
+        # Efecto catalítico (sinergia plasma-TiO2)
+        catalyst_effect = self.calculate_catalyst_effect(geometry, electrical)
+
         # Concentración final
-        concentration_mg_ml = base_concentration * energy_factor * residence_factor * area_factor
+        concentration_mg_ml = (base_concentration * energy_factor * residence_factor *
+                               area_factor * catalyst_effect['conversion_factor'])
         concentration_mg_ml = max(0.01, min(2.0, concentration_mg_ml))
 
         # Producción por hora
@@ -417,6 +523,8 @@ class ReactorDesigner:
         energy_effect = -0.3 * (electrical['energy_density_j_ml'] - 450) / 450
         time_effect = 0.2 * (flow['residence_time_s'] - 20) / 20
         size_nm = base_size_nm * (1 + energy_effect + time_effect)
+        # Catalizador: nucleación en superficie favorece partículas más pequeñas
+        size_nm += catalyst_effect['size_shift_nm']
         size_nm = max(1.5, min(5.0, size_nm))
 
         # Longitud de onda (modelo VQE validado)
@@ -429,6 +537,8 @@ class ReactorDesigner:
             monodispersity += 0.15
         if flow['mixing_complete']:
             monodispersity += 0.1
+        # Monodispersidad mejorada por nucleación en superficie del catalizador
+        monodispersity += catalyst_effect['monodispersity_boost']
         monodispersity = min(0.95, monodispersity)
 
         # Energía específica
@@ -593,12 +703,16 @@ class ReactorDesigner:
             'liquid_flow_ml_min': [2, 5, 10, 15, 20],
             'liquid_depth_mm': [0.2, 0.3, 0.4, 0.5],
             'dielectric_material': list(MATERIALS.keys()),
+            'catalyst_type': [None, 'tio2_anatase', 'tio2_rutile'],
+            'catalyst_porosity': [0.4, 0.5, 0.6, 0.7],
         }
 
         # Búsqueda aleatoria (más eficiente que grilla completa)
         np.random.seed(42)
         for i in range(max_iterations):
             # Generar parámetros aleatorios
+            cat_type = np.random.choice(search_space['catalyst_type'])
+            cat_porosity = np.random.choice(search_space['catalyst_porosity'])
             params = ReactorParameters(
                 geometry=ChamberGeometry.SERPENTINE,
                 channel_width_mm=np.random.choice(search_space['channel_width_mm']),
@@ -611,6 +725,8 @@ class ReactorDesigner:
                 liquid_flow_ml_min=np.random.choice(search_space['liquid_flow_ml_min']),
                 liquid_depth_mm=np.random.choice(search_space['liquid_depth_mm']),
                 dielectric_material=np.random.choice(search_space['dielectric_material']),
+                catalyst_type=cat_type,
+                catalyst_porosity=cat_porosity if cat_type else 0.6,
                 target_production_mg_h=target_production_mg_h,
             )
 
@@ -716,7 +832,30 @@ class ReactorDesigner:
         print("└" + "─" * 78 + "┘")
 
         print("\n┌" + "─" * 78 + "┐")
-        print("│  8. PUNTUACIONES DE DISEÑO" + " " * 51 + "│")
+        print("│  8. CATALIZADOR (sinergia plasma-TiO₂)" + " " * 38 + "│")
+        print("├" + "─" * 78 + "┤")
+        if p.catalyst_type:
+            cat_name = "TiO₂ Anatase Poroso" if 'anatase' in p.catalyst_type else "TiO₂ Rutilo Poroso"
+            # Recalcular efecto para reporte
+            geometry = self.calculate_geometry()
+            electrical = self.calculate_electrical(geometry)
+            cat_effect = self.calculate_catalyst_effect(geometry, electrical)
+            print(f"│  Tipo:                    {cat_name:<50} │")
+            print(f"│  Porosidad:               {p.catalyst_porosity:.0%}" + " " * 50 + "│")
+            print(f"│  Área BET:                {p.catalyst_surface_area_m2_g:.0f} m²/g" + " " * 42 + "│")
+            print(f"│  Carga:                   {p.catalyst_loading_mg_cm2:.1f} mg/cm²" + " " * 41 + "│")
+            print(f"│  Área catalítica real:     {cat_effect['cat_area_m2']*1e4:.2f} cm²" + " " * 40 + "│")
+            print(f"│  Factor de conversión:     {cat_effect['conversion_factor']:.2f}x" + " " * 42 + "│")
+            print(f"│  Mejora monodispersidad:   +{cat_effect['monodispersity_boost']:.3f}" + " " * 42 + "│")
+            print(f"│  Shift tamaño:            {cat_effect['size_shift_nm']:+.2f} nm" + " " * 42 + "│")
+            print(f"│  Fouling:                 {cat_effect['fouling_rate_per_h']:.0%}/h (regen {cat_effect['regeneration_temp_C']}°C/{cat_effect['regeneration_time_h']:.0f}h)" + " " * 22 + "│")
+        else:
+            print(f"│  Tipo:                    Sin catalizador" + " " * 35 + "│")
+            print(f"│  (Usar --catalyst tio2_anatase o tio2_rutile para activar)" + " " * 20 + "│")
+        print("└" + "─" * 78 + "┘")
+
+        print("\n┌" + "─" * 78 + "┐")
+        print("│  9. PUNTUACIONES DE DISEÑO" + " " * 51 + "│")
         print("├" + "─" * 78 + "┤")
         print(f"│  Eficiencia:              {o.efficiency_score:.0f}/100" + " " * 43 + "│")
         print(f"│  Costo:                   {o.cost_score:.0f}/100" + " " * 44 + "│")
@@ -797,6 +936,11 @@ if __name__ == "__main__":
     parser.add_argument("--production-target", type=float, default=50.0,
                        help="Producción objetivo en mg/hora")
     parser.add_argument("--export-cad", type=str, help="Exportar parámetros CAD a archivo JSON")
+    parser.add_argument("--catalyst", type=str, default=None,
+                       choices=["tio2_anatase", "tio2_rutile"],
+                       help="Tipo de catalizador TiO2 (default: ninguno)")
+    parser.add_argument("--porosity", type=float, default=0.6,
+                       help="Porosidad del catalizador 0-1 (default: 0.6)")
     args = parser.parse_args()
 
     print("═" * 80)
@@ -830,7 +974,9 @@ if __name__ == "__main__":
         print("\n→ Ejecutando diseño con parámetros por defecto...")
 
         params = ReactorParameters(
-            target_production_mg_h=args.production_target
+            target_production_mg_h=args.production_target,
+            catalyst_type=args.catalyst,
+            catalyst_porosity=args.porosity if args.catalyst else 0.6,
         )
         designer = ReactorDesigner(params)
         designer.design()

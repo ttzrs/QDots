@@ -127,6 +127,13 @@ class ScaledReactorParameters:
     dielectric_material: str = "borosilicate_glass"
     dielectric_thickness_mm: float = 1.5   # Mas grueso por mayor voltaje
 
+    # Catalizador
+    catalyst_type: Optional[str] = None          # None, "tio2_anatase", "tio2_rutile"
+    catalyst_porosity: float = 0.60              # Porosidad (0-1), tipico 0.4-0.7
+    catalyst_surface_area_m2_g: float = 50.0     # Area BET (m2/g), 50-200 tipico
+    catalyst_thickness_mm: float = 0.5           # Espesor de capa catalitica
+    catalyst_loading_mg_cm2: float = 2.0         # Carga de TiO2 por cm2
+
     # Flujo
     liquid_flow_ml_min: float = 50.0       # Caudal de liquido
     gas_flow_ml_min: float = 200.0         # Caudal de gas
@@ -528,6 +535,94 @@ class MillimetricReactorDesigner:
         }
 
     # =========================================================================
+    #  CATALIZADOR (sinergia plasma-TiO2)
+    # =========================================================================
+
+    def _calculate_catalyst_effect(self, geometry: Dict, electrical: Dict) -> Dict:
+        """
+        Sinergia plasma-TiO2 con correcciones por topologia.
+
+        Contacto catalizador-plasma por topologia:
+        - Falling film: catalizador en la placa = excelente contacto
+        - Multi-channel: catalizador en paredes = bueno
+        - Annular: catalizador en electrodo central = bueno
+        - Bubble column: catalizador como particulas suspendidas = moderado (slurry)
+        """
+        if not self.params.catalyst_type:
+            return {
+                'conversion_factor': 1.0,
+                'monodispersity_boost': 0.0,
+                'size_shift_nm': 0.0,
+                'cat_area_m2': 0.0,
+                'fouling_rate_per_h': 0.0,
+                'regeneration_temp_C': 0,
+                'regeneration_time_h': 0.0,
+                'topology_contact': 'N/A',
+            }
+
+        # Area reactiva total
+        loading = self.params.catalyst_loading_mg_cm2
+        porosity = self.params.catalyst_porosity
+        bet_area = self.params.catalyst_surface_area_m2_g
+        plasma_area = geometry['plasma_area_cm2']
+
+        # Area catalitica real = carga * area_BET * porosidad_accesible
+        cat_area_m2 = (loading * 1e-3) * bet_area * porosity * (plasma_area * 1e-4)
+        cat_area_factor = min(5.0, cat_area_m2 / 1e-4)
+
+        # Factor UV segun tipo
+        if 'anatase' in self.params.catalyst_type:
+            uv_factor = 1.8
+        else:
+            uv_factor = 1.4
+
+        # Factor de energia
+        E = electrical['energy_density_j_ml']
+        energy_activation = min(2.0, E / 300)
+
+        # Correccion por topologia: calidad del contacto catalizador-plasma
+        topo = self.params.topology
+        if topo == ScaleTopology.FALLING_FILM:
+            topo_factor = 1.0       # Excelente: catalizador en la placa
+            topo_contact = 'excelente (placa)'
+        elif topo == ScaleTopology.MULTI_CHANNEL:
+            topo_factor = 0.9       # Bueno: catalizador en paredes del canal
+            topo_contact = 'bueno (paredes)'
+        elif topo == ScaleTopology.ANNULAR:
+            topo_factor = 0.85      # Bueno: catalizador en electrodo central
+            topo_contact = 'bueno (electrodo central)'
+        elif topo == ScaleTopology.BUBBLE_COLUMN:
+            topo_factor = 0.6       # Moderado: slurry TiO2 en suspension
+            topo_contact = 'moderado (slurry)'
+        else:
+            topo_factor = 0.7
+            topo_contact = 'desconocido'
+
+        # Conversion total con correccion topologica
+        conversion_factor = 1.0 + (uv_factor - 1.0) * cat_area_factor * energy_activation * topo_factor
+        conversion_factor = min(3.5, conversion_factor)
+
+        # Monodispersidad
+        mono_boost = 0.05 * porosity * min(1.0, cat_area_factor) * topo_factor
+
+        # Tamano
+        size_shift_nm = -0.2 * min(1.0, cat_area_factor) * topo_factor
+
+        # Fouling
+        fouling_rate_per_h = 0.05
+
+        return {
+            'conversion_factor': conversion_factor,
+            'monodispersity_boost': mono_boost,
+            'size_shift_nm': size_shift_nm,
+            'cat_area_m2': cat_area_m2,
+            'fouling_rate_per_h': fouling_rate_per_h,
+            'regeneration_temp_C': 400,
+            'regeneration_time_h': 1.0,
+            'topology_contact': topo_contact,
+        }
+
+    # =========================================================================
     #  PRODUCCION (modelo escalado)
     # =========================================================================
 
@@ -582,9 +677,13 @@ class MillimetricReactorDesigner:
         #    distribucion ancha de tamanos -> peor monodispersidad
         uniformity = electrical['uniformity_factor']
 
+        # 3. Efecto catalitico (sinergia plasma-TiO2)
+        catalyst_effect = self._calculate_catalyst_effect(geometry, electrical)
+
         # Concentracion final
         concentration = (base_concentration * energy_factor * residence_factor *
-                         area_factor * mixing_factor * uniformity)
+                         area_factor * mixing_factor * uniformity *
+                         catalyst_effect['conversion_factor'])
         concentration = max(0.01, min(2.0, concentration))
 
         # Produccion
@@ -595,6 +694,8 @@ class MillimetricReactorDesigner:
         energy_effect = -0.3 * (E - 450) / 450
         time_effect = 0.2 * (t_res - 20) / 20
         size_nm = base_size * (1 + energy_effect + time_effect)
+        # Catalizador: nucleacion en superficie favorece particulas mas pequenas
+        size_nm += catalyst_effect['size_shift_nm']
         size_nm = max(1.5, min(5.0, size_nm))
 
         # Longitud de onda (modelo VQE)
@@ -608,6 +709,8 @@ class MillimetricReactorDesigner:
         if mixing == 'excellent':
             mono += 0.1
         mono *= uniformity  # Plasma no-uniforme degrada monodispersidad
+        # Monodispersidad mejorada por nucleacion en superficie del catalizador
+        mono += catalyst_effect['monodispersity_boost']
         mono = max(0.3, min(0.95, mono))
 
         return {
@@ -875,6 +978,15 @@ class MillimetricReactorDesigner:
         """Genera configuraciones de busqueda para cada topologia"""
         configs = []
 
+        # Campos de catalizador del diseñador actual
+        cat_fields = {
+            'catalyst_type': self.params.catalyst_type,
+            'catalyst_porosity': self.params.catalyst_porosity,
+            'catalyst_surface_area_m2_g': self.params.catalyst_surface_area_m2_g,
+            'catalyst_thickness_mm': self.params.catalyst_thickness_mm,
+            'catalyst_loading_mg_cm2': self.params.catalyst_loading_mg_cm2,
+        }
+
         # FALLING FILM
         for length in [200, 300, 500]:
             for width in [30, 50, 100]:
@@ -891,6 +1003,7 @@ class MillimetricReactorDesigner:
                                     liquid_flow_ml_min=flow,
                                     voltage_kv=voltage,
                                     target_production_mg_h=target_mg_h,
+                                    **cat_fields,
                                 ))
 
         # MULTI-CHANNEL
@@ -905,6 +1018,7 @@ class MillimetricReactorDesigner:
                             liquid_flow_ml_min=flow,
                             voltage_kv=voltage,
                             target_production_mg_h=target_mg_h,
+                            **cat_fields,
                         ))
 
         # ANNULAR
@@ -923,6 +1037,7 @@ class MillimetricReactorDesigner:
                                 liquid_flow_ml_min=flow,
                                 voltage_kv=voltage,
                                 target_production_mg_h=target_mg_h,
+                                **cat_fields,
                             ))
 
         # BUBBLE COLUMN
@@ -939,6 +1054,7 @@ class MillimetricReactorDesigner:
                                 liquid_flow_ml_min=flow,
                                 voltage_kv=voltage,
                                 target_production_mg_h=target_mg_h,
+                                **cat_fields,
                             ))
 
         return configs
@@ -966,6 +1082,11 @@ class MillimetricReactorDesigner:
                 params = ScaledReactorParameters(
                     topology=topo,
                     liquid_flow_ml_min=flow,
+                    catalyst_type=self.params.catalyst_type,
+                    catalyst_porosity=self.params.catalyst_porosity,
+                    catalyst_surface_area_m2_g=self.params.catalyst_surface_area_m2_g,
+                    catalyst_thickness_mm=self.params.catalyst_thickness_mm,
+                    catalyst_loading_mg_cm2=self.params.catalyst_loading_mg_cm2,
                 )
                 designer = MillimetricReactorDesigner(params)
                 r = designer.evaluate()
@@ -1059,6 +1180,24 @@ class MillimetricReactorDesigner:
         print(f"\n  {'PURIN':=<88}")
         print(f"  Diluido procesado: {r.purin_volume_L_day:.1f} L/dia")
         print(f"  Purin bruto:       {r.purin_bruto_L_day:.2f} L/dia")
+
+        print(f"\n  {'CATALIZADOR':=<88}")
+        if self.params.catalyst_type:
+            geom = self.calculate_geometry()
+            elec = self.calculate_electrical(geom)
+            cat = self._calculate_catalyst_effect(geom, elec)
+            cat_name = "TiO2 Anatase Poroso" if 'anatase' in self.params.catalyst_type else "TiO2 Rutilo Poroso"
+            print(f"  Tipo:              {cat_name}")
+            print(f"  Porosidad:         {self.params.catalyst_porosity:.0%}")
+            print(f"  Area BET:          {self.params.catalyst_surface_area_m2_g:.0f} m2/g")
+            print(f"  Carga:             {self.params.catalyst_loading_mg_cm2:.1f} mg/cm2")
+            print(f"  Area catalitica:   {cat['cat_area_m2']*1e4:.2f} cm2")
+            print(f"  Factor conversion: {cat['conversion_factor']:.2f}x")
+            print(f"  Contacto topo:     {cat['topology_contact']}")
+            print(f"  Mejora mono:       +{cat['monodispersity_boost']:.3f}")
+            print(f"  Fouling:           {cat['fouling_rate_per_h']:.0%}/h (regen {cat['regeneration_temp_C']}C/{cat['regeneration_time_h']:.0f}h)")
+        else:
+            print(f"  Sin catalizador (usar --catalyst tio2_anatase o tio2_rutile)")
 
         print(f"\n  {'vs MICROREACTOR':=<88}")
         print(f"  Factor produccion: {r.vs_micro_production_factor:.1f}x")
@@ -1265,6 +1404,11 @@ def main():
                         help='Comparar todas las topologias')
     parser.add_argument('--scaling-laws', action='store_true',
                         help='Mostrar leyes de escalado')
+    parser.add_argument('--catalyst', type=str, default=None,
+                        choices=['tio2_anatase', 'tio2_rutile'],
+                        help='Tipo de catalizador TiO2 (default: ninguno)')
+    parser.add_argument('--porosity', type=float, default=0.6,
+                        help='Porosidad del catalizador 0-1 (default: 0.6)')
 
     args = parser.parse_args()
 
@@ -1274,14 +1418,22 @@ def main():
         return
 
     if args.purin:
-        designer = MillimetricReactorDesigner()
+        params = ScaledReactorParameters(
+            catalyst_type=args.catalyst,
+            catalyst_porosity=args.porosity if args.catalyst else 0.6,
+        )
+        designer = MillimetricReactorDesigner(params)
         plant = designer.design_purin_plant(args.volume)
         designer.print_purin_plant_report(args.volume, plant)
         designer.print_scaling_laws()
         return
 
     if args.optimize:
-        designer = MillimetricReactorDesigner()
+        params = ScaledReactorParameters(
+            catalyst_type=args.catalyst,
+            catalyst_porosity=args.porosity if args.catalyst else 0.6,
+        )
+        designer = MillimetricReactorDesigner(params)
         opt = designer.optimize(args.target)
 
         if opt['top5']:
@@ -1295,21 +1447,25 @@ def main():
     if args.compare or args.topology is None:
         # Comparar todas las topologias al mismo flujo
         results = []
+        designers = []
         for topo in ScaleTopology:
             params = ScaledReactorParameters(
                 topology=topo,
                 liquid_flow_ml_min=args.flow,
+                catalyst_type=args.catalyst,
+                catalyst_porosity=args.porosity if args.catalyst else 0.6,
             )
             d = MillimetricReactorDesigner(params)
             results.append(d.evaluate())
+            designers.append(d)
 
-        d = MillimetricReactorDesigner()
-        d.print_topology_comparison(results)
+        designers[0].print_topology_comparison(results)
 
         # Reporte del mejor
-        best = max(results, key=lambda r: r.efficiency_score + r.feasibility_score)
-        d.print_report(best)
-        d.print_scaling_laws()
+        best_idx = max(range(len(results)),
+                       key=lambda i: results[i].efficiency_score + results[i].feasibility_score)
+        designers[best_idx].print_report(results[best_idx])
+        designers[0].print_scaling_laws()
         return
 
     # Topologia especifica
@@ -1317,6 +1473,8 @@ def main():
     params = ScaledReactorParameters(
         topology=topo,
         liquid_flow_ml_min=args.flow,
+        catalyst_type=args.catalyst,
+        catalyst_porosity=args.porosity if args.catalyst else 0.6,
     )
     designer = MillimetricReactorDesigner(params)
     result = designer.evaluate()
