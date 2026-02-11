@@ -88,7 +88,8 @@ BUFFER_TANK_ML = 1000.0                  # Tanque buffer 1L entre reactor y clas
 MANIFOLD_DEAD_VOLUME_UL = 50.0           # Volumen muerto del manifold distribuidor
 
 # Economicos
-QDOT_PRICE_USD_PER_MG = 50.0            # Precio de mercado CQDs purificados
+QDOT_PRICE_EUR_PER_G = 30.0             # Precio real de produccion (30 EUR/g)
+QDOT_PRICE_USD_PER_MG = QDOT_PRICE_EUR_PER_G * 1.10 / 1000.0  # ~0.033 USD/mg
 ENERGY_COST_USD_PER_KWH = 0.12          # Costo energia (promedio)
 CLASSIFIER_UNIT_COST_USD = 200.0        # Costo estimado por clasificador (chip + optica)
 REACTOR_BASE_COST_USD = 5000.0          # Costo base del milireactor
@@ -940,8 +941,8 @@ class ParallelClassificationSystem:
               f"({r.n_classifiers} x ${CLASSIFIER_UNIT_COST_USD:.0f})")
         print(f"  Costo reactor:     ${r.reactor_cost_est_usd:,.0f}")
         print(f"  Total HW:          ${r.total_hw_cost_usd:,.0f}")
-        print(f"  Valor producto/dia:${r.daily_product_value_usd:,.0f} "
-              f"(@${QDOT_PRICE_USD_PER_MG}/mg)")
+        print(f"  Valor producto/dia:${r.daily_product_value_usd:,.2f} "
+              f"(@{QDOT_PRICE_EUR_PER_G:.0f} EUR/g)")
         print(f"  Costo energia/dia: ${r.daily_energy_cost_usd:.2f}")
         print(f"  Margen neto/dia:   ${r.daily_product_value_usd - r.daily_energy_cost_usd:,.0f}")
         if r.payback_hours < float('inf'):
