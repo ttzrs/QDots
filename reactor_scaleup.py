@@ -73,6 +73,30 @@ PURIN_CARBON_FRACTION = 0.45        # 45% del organico es carbono
 PURIN_OPTIMAL_DILUTION_G_L = 2.0    # Concentracion optima para DBD
 PURIN_DENSITY_KG_M3 = 1020          # Similar al agua
 
+# Plasma frio: parametros non-thermal DBD
+TE_COLD_PLASMA_EV = 1.5            # Te tipica DBD
+TGAS_MAX_COLD_C = 60.0             # Maximo para "frio"
+TLIQUID_MAX_OUTLET_C = 50.0        # Maximo liquido a salida
+OH_RADICAL_DENSITY_REF = 1e15      # OH* a 1 W/cm2
+O_RADICAL_DENSITY_REF = 5e14       # O* atomico
+O2_NEG_DENSITY_REF = 1e13          # O2-
+PULSE_WIDTH_COLD_LIMIT_NS = 500    # < 500 ns = frio (proyecto.txt)
+FREQUENCY_COLD_MIN_KHZ = 10.0
+FREQUENCY_COLD_MAX_KHZ = 30.0
+DBD_UV_FRACTION = 0.05             # 5% potencia -> UV
+UV_PHOTON_ENERGY_EV = 4.0          # ~310 nm promedio
+TIO2_DEFECT_DENSITY_PER_CM2 = 1e13 # Sitios Ti3+
+
+# TiO2 como barrera dielectrica estructural
+TIO2_EPSILON_R = {
+    'anatase': 40.0,    # Permitividad relativa anatase
+    'rutile': 85.0,     # Permitividad relativa rutile
+}
+TIO2_DIELECTRIC_STRENGTH_MV_M = {
+    'anatase': 4.0,     # Rigidez dielectrica (MV/m)
+    'rutile': 5.0,
+}
+
 
 # =============================================================================
 #  TOPOLOGIAS DE REACTOR ESCALADO
@@ -134,6 +158,13 @@ class ScaledReactorParameters:
     catalyst_thickness_mm: float = 0.5           # Espesor de capa catalitica
     catalyst_loading_mg_cm2: float = 2.0         # Carga de TiO2 por cm2
 
+    # Plasma frio
+    pulse_width_ns: float = 100.0                # Ancho de pulso (< 500 ns = frio)
+
+    # TiO2 como barrera dielectrica estructural
+    tio2_barrier: bool = False                   # TiO2 es la barrera dielectrica misma
+    tio2_barrier_phase: str = "anatase"          # Fase del TiO2 barrera
+
     # Flujo
     liquid_flow_ml_min: float = 50.0       # Caudal de liquido
     gas_flow_ml_min: float = 200.0         # Caudal de gas
@@ -188,6 +219,18 @@ class ScaleupResult:
     # Comparison
     vs_micro_production_factor: float
     vs_micro_efficiency_factor: float
+    # Plasma frio
+    Te_eV: float = 0.0
+    Tgas_C: float = 25.0
+    non_thermal_ratio: float = 0.0
+    plasma_regime: str = "no_plasma"
+    radical_OH_cm3: float = 0.0
+    radical_O_cm3: float = 0.0
+    radical_O2neg_cm3: float = 0.0
+    # Diseno de enfriamiento
+    cooling_margin_percent: float = 0.0
+    coolant_path_length_mm: float = 0.0
+    required_coolant_flow_ml_min: float = 0.0
 
 
 class MillimetricReactorDesigner:
@@ -485,8 +528,21 @@ class MillimetricReactorDesigner:
 
         gas_gap = geometry['gas_gap_mm']
 
-        # Campo electrico
-        effective_gap_mm = gas_gap + p.dielectric_thickness_mm / mat.dielectric_constant
+        # Campo electrico — con opcion de barrera TiO2
+        if p.tio2_barrier and p.catalyst_type:
+            # TiO2 ES la barrera dielectrica: epsilon_r mucho mayor
+            phase = p.tio2_barrier_phase
+            eps_tio2 = TIO2_EPSILON_R.get(phase, 40.0)
+            t_tio2 = p.dielectric_thickness_mm  # Mismo espesor, otro material
+            effective_gap_mm = gas_gap + t_tio2 / eps_tio2
+            # Verificar rigidez dielectrica del TiO2
+            E_in_tio2 = (p.voltage_kv * 1000) / (t_tio2 * 1e-3)  # V/m
+            tio2_strength = TIO2_DIELECTRIC_STRENGTH_MV_M.get(phase, 4.0) * 1e6
+            tio2_dielectric_ok = E_in_tio2 < tio2_strength
+        else:
+            effective_gap_mm = gas_gap + p.dielectric_thickness_mm / mat.dielectric_constant
+            tio2_dielectric_ok = True  # No aplica
+
         E_field = (p.voltage_kv * 1000) / (effective_gap_mm * 1e-3)
 
         breakdown_ok = E_field > BREAKDOWN_FIELD_AIR
@@ -521,7 +577,10 @@ class MillimetricReactorDesigner:
         energy_density = power_w / p.liquid_flow_ml_min * 60
 
         # Verificar dielectrico
-        dielectric_ok = E_field < mat.dielectric_strength
+        if p.tio2_barrier and p.catalyst_type:
+            dielectric_ok = tio2_dielectric_ok
+        else:
+            dielectric_ok = E_field < mat.dielectric_strength
 
         return {
             'electric_field_v_m': E_field,
@@ -532,15 +591,224 @@ class MillimetricReactorDesigner:
             'power_w': power_w,
             'energy_density_j_ml': energy_density,
             'voltage_kv': p.voltage_kv,
+            'effective_gap_mm': effective_gap_mm,
+            'tio2_barrier_active': p.tio2_barrier and p.catalyst_type is not None,
+        }
+
+    # =========================================================================
+    #  PLASMA FRIO (non-thermal DBD)
+    # =========================================================================
+
+    def _calculate_cold_plasma(self, electrical: Dict, geometry: Dict) -> Dict:
+        """
+        Modela el equilibrio non-thermal del plasma DBD.
+
+        En un DBD frio:
+        - Te >> Tgas (electrones calientes, gas frio)
+        - Pulsos cortos (<500 ns) limitan calentamiento del gas
+        - Radicales OH*, O*, O2- escalan con potencia
+        - UV generado activa TiO2
+        """
+        p = self.params
+
+        # --- Te: temperatura electronica ---
+        # Te sube con campo electrico, capped a 3 eV para DBD atmosferico
+        E_field = electrical['electric_field_v_m']
+        E_ratio = E_field / BREAKDOWN_FIELD_AIR
+        Te_eV = TE_COLD_PLASMA_EV * (E_ratio ** 0.3)
+        Te_eV = min(3.0, max(0.5, Te_eV))
+
+        # --- Tgas: temperatura del gas ---
+        # Calentamiento estacionario con correccion por ancho de pulso
+        # Tgas = T_amb + P_heat / (h_conv * A) * sqrt(tau / 500ns)
+        P_heat = electrical['power_w'] * 0.3  # 30% -> calor
+        plasma_area_m2 = geometry['plasma_area_cm2'] * 1e-4
+        h_conv = 50.0  # W/m2/K conveccion forzada tipica
+        pulse_factor = np.sqrt(p.pulse_width_ns / PULSE_WIDTH_COLD_LIMIT_NS)
+        pulse_factor = min(2.0, pulse_factor)
+
+        if plasma_area_m2 > 0 and h_conv > 0:
+            dT_gas = P_heat / (h_conv * plasma_area_m2) * pulse_factor
+        else:
+            dT_gas = 0.0
+        Tgas_C = 25.0 + dT_gas
+
+        # --- Ratio non-thermal ---
+        # Te en Kelvin / Tgas en Kelvin; debe ser >> 1 (tipico 30-100)
+        Te_K = Te_eV * E_ELECTRON / K_BOLTZMANN
+        Tgas_K = Tgas_C + 273.15
+        non_thermal_ratio = Te_K / Tgas_K if Tgas_K > 0 else 0
+
+        # --- Regimen de plasma ---
+        if (Tgas_C < TGAS_MAX_COLD_C and
+                p.pulse_width_ns < PULSE_WIDTH_COLD_LIMIT_NS):
+            plasma_regime = "frio_DBD"
+        elif Tgas_C < 100:
+            plasma_regime = "tibio_DBD"
+        else:
+            plasma_regime = "termico"
+
+        # --- Radicales ---
+        # Escalan como (P/P_ref)^0.7 con correccion de pulso corto
+        P_density = electrical['power_density_w_cm2']
+        P_ref = 1.0  # W/cm2 referencia
+        power_scale = (P_density / P_ref) ** 0.7 if P_density > 0 else 0
+
+        # Pulso corto favorece radicales (menos recombinacion termica)
+        if p.pulse_width_ns < 200:
+            short_pulse_boost = 1.3
+        elif p.pulse_width_ns < PULSE_WIDTH_COLD_LIMIT_NS:
+            short_pulse_boost = 1.0
+        else:
+            short_pulse_boost = 0.7
+
+        radical_OH = OH_RADICAL_DENSITY_REF * power_scale * short_pulse_boost
+        radical_O = O_RADICAL_DENSITY_REF * power_scale * short_pulse_boost
+        radical_O2neg = O2_NEG_DENSITY_REF * power_scale * short_pulse_boost
+
+        # --- UV fotones para activacion TiO2 ---
+        # P_uv = P_total * 5%
+        # N_photons/s = P_uv / E_photon
+        P_uv_w = electrical['power_w'] * DBD_UV_FRACTION
+        E_photon_J = UV_PHOTON_ENERGY_EV * E_ELECTRON
+        if E_photon_J > 0:
+            uv_photon_rate = P_uv_w / E_photon_J  # fotones/s
+        else:
+            uv_photon_rate = 0
+        if plasma_area_m2 > 0:
+            uv_flux_cm2 = uv_photon_rate / (plasma_area_m2 * 1e4)  # fotones/s/cm2
+        else:
+            uv_flux_cm2 = 0
+
+        return {
+            'Te_eV': Te_eV,
+            'Tgas_C': Tgas_C,
+            'Te_K': Te_K,
+            'Tgas_K': Tgas_K,
+            'non_thermal_ratio': non_thermal_ratio,
+            'plasma_regime': plasma_regime,
+            'radical_OH_cm3': radical_OH,
+            'radical_O_cm3': radical_O,
+            'radical_O2neg_cm3': radical_O2neg,
+            'uv_photon_rate': uv_photon_rate,
+            'uv_flux_cm2': uv_flux_cm2,
+            'pulse_factor': pulse_factor,
+            'short_pulse_boost': short_pulse_boost,
+        }
+
+    # =========================================================================
+    #  DISENO DE ENFRIAMIENTO (serpentina)
+    # =========================================================================
+
+    def _calculate_cooling_design(self, electrical: Dict, geometry: Dict) -> Dict:
+        """
+        Disena serpentina de enfriamiento usando modelo Dittus-Boelter.
+
+        Nu = 0.023 * Re^0.8 * Pr^0.4 (regimen turbulento)
+        h_coolant = Nu * k_agua / D_tubo
+        A_serpentina = Q_heat / (h * LMTD)
+        L_path = A / (pi * D_tubo)
+        """
+        p = self.params
+
+        Q_heat = electrical['power_w'] * 0.3  # Calor a remover
+
+        # Propiedades del agua refrigerante a ~20 C
+        rho_w = 998.0       # kg/m3
+        cp_w = 4186.0       # J/kg/K
+        mu_w = 0.001        # Pa*s
+        k_w = 0.60          # W/m/K
+        Pr_w = cp_w * mu_w / k_w  # ~7.0
+
+        # Tubo de enfriamiento
+        D_tubo_mm = 4.0     # Diametro interno serpentina
+        D_tubo_m = D_tubo_mm * 1e-3
+
+        # Flujo de refrigerante
+        coolant_m3_s = p.coolant_flow_ml_min / 60.0 * 1e-6
+        A_tubo = np.pi * (D_tubo_m / 2) ** 2
+        v_coolant = coolant_m3_s / A_tubo if A_tubo > 0 else 0
+
+        # Reynolds del refrigerante
+        Re_coolant = rho_w * v_coolant * D_tubo_m / mu_w
+
+        # Coeficiente de transferencia de calor
+        if Re_coolant > 2300:
+            # Dittus-Boelter (turbulento)
+            Nu = 0.023 * (Re_coolant ** 0.8) * (Pr_w ** 0.4)
+        else:
+            # Laminar en tubo: Nu = 3.66 (pared isotermica)
+            Nu = 3.66
+
+        h_coolant = Nu * k_w / D_tubo_m if D_tubo_m > 0 else 0
+
+        # LMTD (Log Mean Temperature Difference)
+        T_hot = 25.0 + Q_heat / (cp_w * max(coolant_m3_s * rho_w, 1e-6))
+        T_cold_in = p.coolant_temp_C
+        T_cold_out = T_cold_in + Q_heat / (cp_w * max(coolant_m3_s * rho_w, 1e-6))
+        dT1 = T_hot - T_cold_in
+        dT2 = T_hot - T_cold_out
+        if dT1 > 0 and dT2 > 0 and abs(dT1 - dT2) > 0.01:
+            LMTD = (dT1 - dT2) / np.log(dT1 / dT2)
+        elif dT1 > 0:
+            LMTD = dT1
+        else:
+            LMTD = 1.0  # Fallback
+
+        # Area de serpentina necesaria
+        if h_coolant > 0 and LMTD > 0:
+            A_serpentina_m2 = Q_heat / (h_coolant * LMTD)
+        else:
+            A_serpentina_m2 = 0
+
+        # Longitud de serpentina
+        L_path_m = A_serpentina_m2 / (np.pi * D_tubo_m) if D_tubo_m > 0 else 0
+        L_path_mm = L_path_m * 1000
+
+        # Capacidad maxima de enfriamiento
+        heat_capacity_w = h_coolant * A_serpentina_m2 * LMTD if A_serpentina_m2 > 0 else 0
+
+        # Margen de enfriamiento
+        if Q_heat > 0:
+            # Capacidad total = flujo liquido + serpentina
+            mass_flow_liquid = p.liquid_flow_ml_min / 60.0 * 1e-3  # kg/s
+            heat_liquid_w = mass_flow_liquid * cp_w * 10.0  # 10K delta
+            coolant_flow_w = coolant_m3_s * rho_w * cp_w * (25 - p.coolant_temp_C)
+            total_capacity = heat_liquid_w + coolant_flow_w
+            cooling_margin = (total_capacity - Q_heat) / Q_heat * 100
+        else:
+            cooling_margin = 100.0
+
+        # Flujo minimo requerido de refrigerante
+        if Q_heat > 0 and cp_w > 0 and (25 - p.coolant_temp_C) > 0:
+            required_flow_m3_s = Q_heat / (rho_w * cp_w * (25 - p.coolant_temp_C))
+            required_flow_ml_min = required_flow_m3_s * 1e6 * 60
+        else:
+            required_flow_ml_min = 0.0
+
+        return {
+            'h_coolant_w_m2k': h_coolant,
+            'Re_coolant': Re_coolant,
+            'Nu_coolant': Nu,
+            'LMTD_K': LMTD,
+            'A_serpentina_m2': A_serpentina_m2,
+            'coolant_path_length_mm': L_path_mm,
+            'cooling_margin_percent': cooling_margin,
+            'required_coolant_flow_ml_min': required_flow_ml_min,
+            'D_tubo_mm': D_tubo_mm,
         }
 
     # =========================================================================
     #  CATALIZADOR (sinergia plasma-TiO2)
     # =========================================================================
 
-    def _calculate_catalyst_effect(self, geometry: Dict, electrical: Dict) -> Dict:
+    def _calculate_catalyst_effect(self, geometry: Dict, electrical: Dict,
+                                    cold_plasma: Optional[Dict] = None) -> Dict:
         """
         Sinergia plasma-TiO2 con correcciones por topologia.
+
+        Si cold_plasma data disponible, usa flujo UV calculado y sitios
+        de nucleacion Ti3+. Si no, fallback a factores fijos.
 
         Contacto catalizador-plasma por topologia:
         - Falling film: catalizador en la placa = excelente contacto
@@ -558,6 +826,8 @@ class MillimetricReactorDesigner:
                 'regeneration_temp_C': 0,
                 'regeneration_time_h': 0.0,
                 'topology_contact': 'N/A',
+                'nucleation_sites': 0.0,
+                'uv_quantum_yield': 0.0,
             }
 
         # Area reactiva total
@@ -570,11 +840,31 @@ class MillimetricReactorDesigner:
         cat_area_m2 = (loading * 1e-3) * bet_area * porosity * (plasma_area * 1e-4)
         cat_area_factor = min(5.0, cat_area_m2 / 1e-4)
 
-        # Factor UV segun tipo
-        if 'anatase' in self.params.catalyst_type:
-            uv_factor = 1.8
+        # Factor UV: modelo basado en fotones si cold_plasma disponible
+        if cold_plasma is not None and cold_plasma.get('uv_flux_cm2', 0) > 0:
+            # Quantum yield: anatase ~0.04, rutile ~0.02
+            if 'anatase' in self.params.catalyst_type:
+                qy = 0.04
+            else:
+                qy = 0.02
+            # Absorcion UV por TiO2 (~80% de fotones incidentes)
+            absorption = 0.80
+            # Factor UV calculado: fotones absorbidos * QY, normalizado
+            uv_absorbed = cold_plasma['uv_flux_cm2'] * absorption * qy
+            # Referencia: 1e12 fotones efectivos/s/cm2 = factor 1.8
+            uv_factor = 1.0 + 0.8 * min(2.0, uv_absorbed / 1e12)
         else:
-            uv_factor = 1.4
+            # Fallback a valores fijos (backward compatible)
+            qy = 0.0
+            if 'anatase' in self.params.catalyst_type:
+                uv_factor = 1.8
+            else:
+                uv_factor = 1.4
+
+        # Sitios de nucleacion Ti3+
+        nucleation_sites = TIO2_DEFECT_DENSITY_PER_CM2 * plasma_area * porosity
+        # Mas sitios -> nucleacion mas uniforme -> mejor monodispersidad
+        nucleation_norm = min(1.0, nucleation_sites / 1e16)
 
         # Factor de energia
         E = electrical['energy_density_j_ml']
@@ -602,8 +892,9 @@ class MillimetricReactorDesigner:
         conversion_factor = 1.0 + (uv_factor - 1.0) * cat_area_factor * energy_activation * topo_factor
         conversion_factor = min(3.5, conversion_factor)
 
-        # Monodispersidad
+        # Monodispersidad: base + nucleacion Ti3+
         mono_boost = 0.05 * porosity * min(1.0, cat_area_factor) * topo_factor
+        mono_boost += 0.02 * nucleation_norm  # Extra por nucleacion uniforme
 
         # Tamano
         size_shift_nm = -0.2 * min(1.0, cat_area_factor) * topo_factor
@@ -620,16 +911,19 @@ class MillimetricReactorDesigner:
             'regeneration_temp_C': 400,
             'regeneration_time_h': 1.0,
             'topology_contact': topo_contact,
+            'nucleation_sites': nucleation_sites,
+            'uv_quantum_yield': qy,
         }
 
     # =========================================================================
     #  PRODUCCION (modelo escalado)
     # =========================================================================
 
-    def calculate_production(self, geometry: Dict, electrical: Dict) -> Dict:
+    def calculate_production(self, geometry: Dict, electrical: Dict,
+                             cold_plasma: Optional[Dict] = None) -> Dict:
         """
         Estima produccion usando el mismo modelo cinetico que el microreactor,
-        con correcciones por calidad de mezcla y uniformidad de plasma.
+        con correcciones por calidad de mezcla, uniformidad de plasma, y radicales.
         """
         p = self.params
 
@@ -677,13 +971,23 @@ class MillimetricReactorDesigner:
         #    distribucion ancha de tamanos -> peor monodispersidad
         uniformity = electrical['uniformity_factor']
 
-        # 3. Efecto catalitico (sinergia plasma-TiO2)
-        catalyst_effect = self._calculate_catalyst_effect(geometry, electrical)
+        # 3. Efecto catalitico (sinergia plasma-TiO2, ahora con datos UV)
+        catalyst_effect = self._calculate_catalyst_effect(geometry, electrical,
+                                                          cold_plasma)
+
+        # 4. Factor de radicales (OH* y O* mejoran fragmentacion del precursor)
+        #    Solo aplica con catalizador (sinergia plasma-catalizador)
+        radical_factor = 1.0
+        if cold_plasma is not None and p.catalyst_type:
+            OH_norm = cold_plasma['radical_OH_cm3'] / OH_RADICAL_DENSITY_REF
+            O_norm = cold_plasma['radical_O_cm3'] / O_RADICAL_DENSITY_REF
+            radical_factor = 1.0 + 0.1 * (OH_norm + O_norm - 2.0)
+            radical_factor = max(0.8, min(1.3, radical_factor))
 
         # Concentracion final
         concentration = (base_concentration * energy_factor * residence_factor *
                          area_factor * mixing_factor * uniformity *
-                         catalyst_effect['conversion_factor'])
+                         catalyst_effect['conversion_factor'] * radical_factor)
         concentration = max(0.01, min(2.0, concentration))
 
         # Produccion
@@ -724,14 +1028,17 @@ class MillimetricReactorDesigner:
             'residence_factor': residence_factor,
             'mixing_factor': mixing_factor,
             'uniformity_factor': uniformity,
+            'radical_factor': radical_factor,
         }
 
     # =========================================================================
     #  TERMICA
     # =========================================================================
 
-    def calculate_thermal(self, electrical: Dict) -> Dict:
-        """Balance termico con enfriamiento activo"""
+    def calculate_thermal(self, electrical: Dict,
+                          cold_plasma: Optional[Dict] = None,
+                          cooling_design: Optional[Dict] = None) -> Dict:
+        """Balance termico con enfriamiento activo y verificacion de plasma frio"""
         p = self.params
 
         # Calor generado por plasma (30% de potencia electrica)
@@ -755,6 +1062,20 @@ class MillimetricReactorDesigner:
         else:
             actual_dT = dT_max + (heat_gen_w - total_removal) / max(mass_flow * cp, 1e-6)
 
+        max_temp_C = 25.0 + actual_dT
+
+        # Verificaciones de plasma frio
+        Tgas_C = cold_plasma['Tgas_C'] if cold_plasma else max_temp_C
+        Tgas_ok = Tgas_C < TGAS_MAX_COLD_C
+        T_liquid_outlet = max_temp_C
+        T_liquid_ok = T_liquid_outlet < TLIQUID_MAX_OUTLET_C
+
+        # Margen del sistema de enfriamiento
+        if cooling_design:
+            cooling_margin = cooling_design['cooling_margin_percent']
+        else:
+            cooling_margin = (total_removal - heat_gen_w) / max(heat_gen_w, 0.01) * 100
+
         return {
             'heat_generation_w': heat_gen_w,
             'heat_flow_removal_w': heat_flow_w,
@@ -762,7 +1083,12 @@ class MillimetricReactorDesigner:
             'total_removal_w': total_removal,
             'cooling_sufficient': cooling_ok,
             'temp_rise_C': actual_dT,
-            'max_temp_C': 25.0 + actual_dT,
+            'max_temp_C': max_temp_C,
+            'Tgas_C': Tgas_C,
+            'Tgas_ok': Tgas_ok,
+            'T_liquid_outlet_C': T_liquid_outlet,
+            'T_liquid_ok': T_liquid_ok,
+            'cooling_margin_percent': cooling_margin,
         }
 
     # =========================================================================
@@ -810,8 +1136,9 @@ class MillimetricReactorDesigner:
     # =========================================================================
 
     def calculate_scores(self, geometry: Dict, electrical: Dict,
-                         production: Dict, thermal: Dict) -> Dict:
-        """Scores de diseno"""
+                         production: Dict, thermal: Dict,
+                         cold_plasma: Optional[Dict] = None) -> Dict:
+        """Scores de diseno con penalizaciones por plasma no-frio"""
 
         # Eficiencia (0-100)
         eff = 0
@@ -850,6 +1177,16 @@ class MillimetricReactorDesigner:
             feas -= 15
         if production['monodispersity'] < 0.5:
             feas -= 10
+
+        # Penalizaciones por plasma no-frio
+        if cold_plasma is not None:
+            if cold_plasma['Tgas_C'] > TGAS_MAX_COLD_C:
+                feas -= 20  # Gas demasiado caliente
+            if not thermal.get('T_liquid_ok', True):
+                feas -= 10  # Liquido sobre 50 C
+            if cold_plasma['plasma_regime'] == 'termico':
+                feas -= 10  # Plasma no es non-thermal
+
         feas = max(0, feas)
 
         # Costo (0-100)
@@ -875,15 +1212,22 @@ class MillimetricReactorDesigner:
     # =========================================================================
 
     def evaluate(self) -> ScaleupResult:
-        """Evaluacion completa de un punto de diseno"""
+        """
+        Evaluacion completa de un punto de diseno.
+
+        Pipeline: geom -> elec -> cold_plasma -> cooling_design ->
+                  prod(cold_plasma) -> therm(cold_plasma, cooling) -> scores
+        """
         p = self.params
 
         geom = self.calculate_geometry()
         elec = self.calculate_electrical(geom)
-        prod = self.calculate_production(geom, elec)
-        therm = self.calculate_thermal(elec)
+        cp_data = self._calculate_cold_plasma(elec, geom)
+        cool = self._calculate_cooling_design(elec, geom)
+        prod = self.calculate_production(geom, elec, cp_data)
+        therm = self.calculate_thermal(elec, cp_data, cool)
         purin = self.calculate_purin_processing()
-        scores = self.calculate_scores(geom, elec, prod, therm)
+        scores = self.calculate_scores(geom, elec, prod, therm, cp_data)
 
         # Comparacion con micro
         vs_prod = prod['production_mg_h'] / self.MICRO_PRODUCTION_MG_H
@@ -923,6 +1267,18 @@ class MillimetricReactorDesigner:
             cost_score=scores['cost_score'],
             vs_micro_production_factor=vs_prod,
             vs_micro_efficiency_factor=vs_eff,
+            # Plasma frio
+            Te_eV=cp_data['Te_eV'],
+            Tgas_C=cp_data['Tgas_C'],
+            non_thermal_ratio=cp_data['non_thermal_ratio'],
+            plasma_regime=cp_data['plasma_regime'],
+            radical_OH_cm3=cp_data['radical_OH_cm3'],
+            radical_O_cm3=cp_data['radical_O_cm3'],
+            radical_O2neg_cm3=cp_data['radical_O2neg_cm3'],
+            # Diseno de enfriamiento
+            cooling_margin_percent=cool['cooling_margin_percent'],
+            coolant_path_length_mm=cool['coolant_path_length_mm'],
+            required_coolant_flow_ml_min=cool['required_coolant_flow_ml_min'],
         )
 
     # =========================================================================
@@ -978,13 +1334,16 @@ class MillimetricReactorDesigner:
         """Genera configuraciones de busqueda para cada topologia"""
         configs = []
 
-        # Campos de catalizador del diseñador actual
+        # Campos de catalizador y plasma del diseñador actual
         cat_fields = {
             'catalyst_type': self.params.catalyst_type,
             'catalyst_porosity': self.params.catalyst_porosity,
             'catalyst_surface_area_m2_g': self.params.catalyst_surface_area_m2_g,
             'catalyst_thickness_mm': self.params.catalyst_thickness_mm,
             'catalyst_loading_mg_cm2': self.params.catalyst_loading_mg_cm2,
+            'pulse_width_ns': self.params.pulse_width_ns,
+            'tio2_barrier': self.params.tio2_barrier,
+            'tio2_barrier_phase': self.params.tio2_barrier_phase,
         }
 
         # FALLING FILM
@@ -1087,6 +1446,9 @@ class MillimetricReactorDesigner:
                     catalyst_surface_area_m2_g=self.params.catalyst_surface_area_m2_g,
                     catalyst_thickness_mm=self.params.catalyst_thickness_mm,
                     catalyst_loading_mg_cm2=self.params.catalyst_loading_mg_cm2,
+                    pulse_width_ns=self.params.pulse_width_ns,
+                    tio2_barrier=self.params.tio2_barrier,
+                    tio2_barrier_phase=self.params.tio2_barrier_phase,
                 )
                 designer = MillimetricReactorDesigner(params)
                 r = designer.evaluate()
@@ -1181,11 +1543,28 @@ class MillimetricReactorDesigner:
         print(f"  Diluido procesado: {r.purin_volume_L_day:.1f} L/dia")
         print(f"  Purin bruto:       {r.purin_bruto_L_day:.2f} L/dia")
 
+        print(f"\n  {'PLASMA FRIO':=<88}")
+        print(f"  Te:                {r.Te_eV:.2f} eV")
+        print(f"  Tgas:              {r.Tgas_C:.1f} C "
+              f"({'OK < 60C' if r.Tgas_C < TGAS_MAX_COLD_C else 'CALIENTE'})")
+        print(f"  Ratio non-thermal: {r.non_thermal_ratio:.1f} "
+              f"({'OK >> 1' if r.non_thermal_ratio > 10 else 'BAJO'})")
+        print(f"  Regimen:           {r.plasma_regime}")
+        print(f"  OH* radicales:     {r.radical_OH_cm3:.2e} cm-3")
+        print(f"  O* radicales:      {r.radical_O_cm3:.2e} cm-3")
+        print(f"  O2- radicales:     {r.radical_O2neg_cm3:.2e} cm-3")
+
+        print(f"\n  {'DISENO ENFRIAMIENTO':=<88}")
+        print(f"  Serpentina:        {r.coolant_path_length_mm:.0f} mm")
+        print(f"  Flujo min coolant: {r.required_coolant_flow_ml_min:.1f} mL/min")
+        print(f"  Margen enfriamto:  {r.cooling_margin_percent:.1f}%")
+
         print(f"\n  {'CATALIZADOR':=<88}")
         if self.params.catalyst_type:
             geom = self.calculate_geometry()
             elec = self.calculate_electrical(geom)
-            cat = self._calculate_catalyst_effect(geom, elec)
+            cp_data = self._calculate_cold_plasma(elec, geom)
+            cat = self._calculate_catalyst_effect(geom, elec, cp_data)
             cat_name = "TiO2 Anatase Poroso" if 'anatase' in self.params.catalyst_type else "TiO2 Rutilo Poroso"
             print(f"  Tipo:              {cat_name}")
             print(f"  Porosidad:         {self.params.catalyst_porosity:.0%}")
@@ -1195,9 +1574,19 @@ class MillimetricReactorDesigner:
             print(f"  Factor conversion: {cat['conversion_factor']:.2f}x")
             print(f"  Contacto topo:     {cat['topology_contact']}")
             print(f"  Mejora mono:       +{cat['monodispersity_boost']:.3f}")
+            print(f"  Sitios nucleacion: {cat['nucleation_sites']:.2e}")
             print(f"  Fouling:           {cat['fouling_rate_per_h']:.0%}/h (regen {cat['regeneration_temp_C']}C/{cat['regeneration_time_h']:.0f}h)")
         else:
             print(f"  Sin catalizador (usar --catalyst tio2_anatase o tio2_rutile)")
+
+        if self.params.tio2_barrier and self.params.catalyst_type:
+            phase = self.params.tio2_barrier_phase
+            eps_r = TIO2_EPSILON_R.get(phase, 40.0)
+            print(f"\n  {'BARRERA TiO2 ESTRUCTURAL':=<88}")
+            print(f"  Fase:              {phase}")
+            print(f"  Epsilon_r:         {eps_r:.0f} (vs vidrio ~4.6)")
+            print(f"  Reduccion gap eff: {eps_r / 4.6:.1f}x")
+            print(f"  Rigidez diel:      {TIO2_DIELECTRIC_STRENGTH_MV_M.get(phase, 4.0):.0f} MV/m")
 
         print(f"\n  {'vs MICROREACTOR':=<88}")
         print(f"  Factor produccion: {r.vs_micro_production_factor:.1f}x")
@@ -1409,6 +1798,13 @@ def main():
                         help='Tipo de catalizador TiO2 (default: ninguno)')
     parser.add_argument('--porosity', type=float, default=0.6,
                         help='Porosidad del catalizador 0-1 (default: 0.6)')
+    parser.add_argument('--pulse-width', type=float, default=100.0,
+                        help='Ancho de pulso en ns (default: 100, <500 = frio)')
+    parser.add_argument('--tio2-barrier', action='store_true',
+                        help='Usar TiO2 como barrera dielectrica estructural')
+    parser.add_argument('--tio2-phase', type=str, default='anatase',
+                        choices=['anatase', 'rutile'],
+                        help='Fase del TiO2 barrera (default: anatase)')
 
     args = parser.parse_args()
 
@@ -1421,6 +1817,9 @@ def main():
         params = ScaledReactorParameters(
             catalyst_type=args.catalyst,
             catalyst_porosity=args.porosity if args.catalyst else 0.6,
+            pulse_width_ns=args.pulse_width,
+            tio2_barrier=args.tio2_barrier,
+            tio2_barrier_phase=args.tio2_phase,
         )
         designer = MillimetricReactorDesigner(params)
         plant = designer.design_purin_plant(args.volume)
@@ -1432,6 +1831,9 @@ def main():
         params = ScaledReactorParameters(
             catalyst_type=args.catalyst,
             catalyst_porosity=args.porosity if args.catalyst else 0.6,
+            pulse_width_ns=args.pulse_width,
+            tio2_barrier=args.tio2_barrier,
+            tio2_barrier_phase=args.tio2_phase,
         )
         designer = MillimetricReactorDesigner(params)
         opt = designer.optimize(args.target)
@@ -1454,6 +1856,9 @@ def main():
                 liquid_flow_ml_min=args.flow,
                 catalyst_type=args.catalyst,
                 catalyst_porosity=args.porosity if args.catalyst else 0.6,
+                pulse_width_ns=args.pulse_width,
+                tio2_barrier=args.tio2_barrier,
+                tio2_barrier_phase=args.tio2_phase,
             )
             d = MillimetricReactorDesigner(params)
             results.append(d.evaluate())
@@ -1475,6 +1880,9 @@ def main():
         liquid_flow_ml_min=args.flow,
         catalyst_type=args.catalyst,
         catalyst_porosity=args.porosity if args.catalyst else 0.6,
+        pulse_width_ns=args.pulse_width,
+        tio2_barrier=args.tio2_barrier,
+        tio2_barrier_phase=args.tio2_phase,
     )
     designer = MillimetricReactorDesigner(params)
     result = designer.evaluate()
