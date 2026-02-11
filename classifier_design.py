@@ -79,6 +79,65 @@ EV_TO_NM = 1240                # Conversion energia-longitud de onda
 
 
 # ===============================================================================
+#  PROPIEDADES DE SOLVENTES
+# ===============================================================================
+
+@dataclass
+class SolventProperties:
+    """Propiedades fisicas de un solvente para el clasificador"""
+    name: str
+    density_kg_m3: float           # Densidad (kg/m^3)
+    viscosity_Pa_s: float          # Viscosidad dinamica (Pa.s)
+    thermal_conductivity_W_mK: float  # Conductividad termica (W/m/K)
+    heat_capacity_J_kgK: float     # Capacidad calorifica (J/kg/K)
+    refractive_index: float        # Indice de refraccion
+    soret_coefficient: float       # Coeficiente de Soret tipico para CQDs (K^-1)
+    boiling_point_C: float         # Punto de ebullicion (C)
+    arrhenius_A: float             # Constante Arrhenius para viscosidad (K)
+
+    @property
+    def thermal_diffusivity_m2_s(self) -> float:
+        return self.thermal_conductivity_W_mK / (self.density_kg_m3 * self.heat_capacity_J_kgK)
+
+
+# Presets de solventes
+SOLVENT_WATER = SolventProperties(
+    name="Agua", density_kg_m3=998, viscosity_Pa_s=0.001,
+    thermal_conductivity_W_mK=0.60, heat_capacity_J_kgK=4186,
+    refractive_index=1.33, soret_coefficient=0.05,
+    boiling_point_C=100.0, arrhenius_A=1890.0,
+)
+
+SOLVENT_TOLUENE = SolventProperties(
+    name="Tolueno", density_kg_m3=867, viscosity_Pa_s=0.00059,
+    thermal_conductivity_W_mK=0.13, heat_capacity_J_kgK=1700,
+    refractive_index=1.497, soret_coefficient=0.15,
+    boiling_point_C=110.6, arrhenius_A=1460.0,
+)
+
+SOLVENT_HEXANE = SolventProperties(
+    name="Hexano", density_kg_m3=655, viscosity_Pa_s=0.00030,
+    thermal_conductivity_W_mK=0.12, heat_capacity_J_kgK=2260,
+    refractive_index=1.375, soret_coefficient=0.12,
+    boiling_point_C=69.0, arrhenius_A=1200.0,
+)
+
+SOLVENT_CHLOROFORM = SolventProperties(
+    name="Cloroformo", density_kg_m3=1490, viscosity_Pa_s=0.00056,
+    thermal_conductivity_W_mK=0.13, heat_capacity_J_kgK=960,
+    refractive_index=1.446, soret_coefficient=0.20,
+    boiling_point_C=61.2, arrhenius_A=1350.0,
+)
+
+SOLVENTS = {
+    'water': SOLVENT_WATER,
+    'toluene': SOLVENT_TOLUENE,
+    'hexane': SOLVENT_HEXANE,
+    'chloroform': SOLVENT_CHLOROFORM,
+}
+
+
+# ===============================================================================
 #  MODOS DE EXCITACION
 # ===============================================================================
 
@@ -1938,17 +1997,45 @@ class MultiStageRecirculationSystem:
         * Eficiencia de separacion: cambia por competencia D vs v_thermo
     """
 
-    # Propiedades termicas del agua
-    CP_WATER = 4186.0             # Capacidad calorifica del agua (J/kg/K)
-    ARRHENIUS_A = 1890.0          # Constante de Arrhenius para viscosidad del agua (K)
-    MU_REF = 0.001                # Viscosidad de referencia a 298.15 K (Pa.s)
     T_REF = 298.15                # Temperatura de referencia (K)
 
     def __init__(self, base_params: Optional[ClassifierParameters] = None,
-                 zones_config: Optional[List[Dict]] = None):
+                 zones_config: Optional[List[Dict]] = None,
+                 solvent: Optional[SolventProperties] = None,
+                 microchannel_volume_uL: Optional[float] = None):
         self.base_params = base_params or ClassifierParameters()
         self.zones_config = zones_config or DEFAULT_ZONES_CONFIG
         self.output = MultiStageOutput()
+
+        # Solvente: agua por defecto, o solvente organico
+        self.solvent = solvent or SOLVENT_WATER
+
+        # Propiedades del solvente (reemplazan constantes de clase)
+        self.CP = self.solvent.heat_capacity_J_kgK
+        self.RHO = self.solvent.density_kg_m3
+        self.MU_REF = self.solvent.viscosity_Pa_s
+        self.K_THERMAL = self.solvent.thermal_conductivity_W_mK
+        self.ARRHENIUS_A = self.solvent.arrhenius_A
+        self.S_T_REF = self.solvent.soret_coefficient
+        self.BOILING_POINT_K = self.solvent.boiling_point_C + 273.15
+
+        # Override Soret del base_params con el del solvente
+        if self.base_params.soret_coefficient != self.solvent.soret_coefficient:
+            self.base_params.soret_coefficient = self.solvent.soret_coefficient
+
+        # Microcanal: volumen personalizado (uL por zona)
+        # Si se especifica, sobreescribe el calculo geometrico
+        self.microchannel_volume_uL = microchannel_volume_uL
+
+        # Auto-ajustar flow rate para microcanales
+        # Microcanales sub-50uL requieren flujo microfluídico (0.03-0.10 mL/min)
+        # para tiempos de residencia suficientes (>1s)
+        if microchannel_volume_uL is not None and self.base_params.flow_rate_ml_min > 0.5:
+            # Calcular flow rate para t_res ~6s (optimo para separacion termoforetica)
+            target_residence_s = 6.0
+            V_mL = microchannel_volume_uL * 0.001  # uL -> mL
+            auto_flow = V_mL / target_residence_s * 60.0  # mL/min
+            self.base_params.flow_rate_ml_min = max(0.01, min(0.10, auto_flow))
 
         # Disenador base (para calculos de fisica de zona)
         self._base_designer = ClassifierDesigner(self.base_params, self.zones_config)
@@ -1966,13 +2053,36 @@ class MultiStageRecirculationSystem:
         fluid_heat_fraction = 0.6
         return P_W * absorptance * fluid_heat_fraction * residence_time_s
 
+    def _get_effective_volume_ml(self, geometry_volume_ml: float) -> float:
+        """Retorna volumen efectivo: microcanal si esta configurado, sino geometria"""
+        if self.microchannel_volume_uL is not None:
+            # uL -> mL (1 uL = 0.001 mL)
+            n_zones = self.base_params.n_zones
+            return self.microchannel_volume_uL * n_zones * 0.001
+        return geometry_volume_ml
+
+    def _get_zone_volume_ml(self, geometry_zone_volume_ml: float) -> float:
+        """Volumen de una zona individual"""
+        if self.microchannel_volume_uL is not None:
+            return self.microchannel_volume_uL * 0.001
+        return geometry_zone_volume_ml
+
+    def _get_residence_time_s(self, geometry_residence_time_s: float) -> float:
+        """Tiempo de residencia ajustado para microcanal"""
+        if self.microchannel_volume_uL is not None:
+            # Para microcanal: t_res = V / Q
+            Q_m3s = self.base_params.flow_rate_ml_min / 60.0 * 1e-6
+            V_m3 = self.microchannel_volume_uL * 1e-9  # uL -> m3
+            return V_m3 / max(Q_m3s, 1e-20)
+        return geometry_residence_time_s
+
     def _calculate_fluid_heating(self, energy_J: float,
                                   fluid_volume_ml: float) -> float:
         """Calentamiento del fluido por energia depositada (K)"""
-        mass_kg = fluid_volume_ml * 1e-6 * DENSITY_WATER  # mL -> m^3 -> kg
+        mass_kg = fluid_volume_ml * 1e-6 * self.RHO  # mL -> m^3 -> kg
         if mass_kg <= 0:
             return 0.0
-        return energy_J / (mass_kg * self.CP_WATER)
+        return energy_J / (mass_kg * self.CP)
 
     def _viscosity_at_temperature(self, T_K: float) -> float:
         """Viscosidad del agua a temperatura T usando modelo Arrhenius"""
@@ -1983,7 +2093,7 @@ class MultiStageRecirculationSystem:
         S_T disminuye con T: S_T(T) ~ S_T_ref * (T_ref/T)^2
         """
         if S_T_ref is None:
-            S_T_ref = self.base_params.soret_coefficient
+            S_T_ref = self.S_T_REF
         return S_T_ref * (self.T_REF / T_K) ** 2
 
     def _update_energy_state(self, state: ChamberEnergyState,
@@ -2005,6 +2115,12 @@ class MultiStageRecirculationSystem:
 
         # Nuevo dT acumulado
         new_state.dT_accumulated_K = dT_after_cooling + dT_this_pass
+
+        # Clamp: no superar punto de ebullicion del solvente
+        max_dT = self.BOILING_POINT_K - state.T_fluid_initial_K - 5.0  # 5K margen
+        if new_state.dT_accumulated_K > max_dT:
+            new_state.dT_accumulated_K = max_dT
+
         new_state.T_fluid_K = state.T_fluid_initial_K + new_state.dT_accumulated_K
 
         # Energia total depositada
@@ -2019,12 +2135,61 @@ class MultiStageRecirculationSystem:
 
         # Factor de Soret: disminuye con T
         S_T_current = self._soret_at_temperature(new_state.T_fluid_K)
-        new_state.soret_factor = S_T_current / self.base_params.soret_coefficient
+        new_state.soret_factor = S_T_current / max(self.S_T_REF, 1e-10)
 
         # Tiempo de equilibrio termico
         new_state.thermal_equilibrium_time_s = cooling_time_s
 
         return new_state
+
+    # ===========================================================================
+    #  AUTO-SELECCION DE ESTRATEGIA SEGUN SOLVENTE
+    # ===========================================================================
+
+    def _auto_select_strategy(self) -> Tuple[str, float]:
+        """
+        Selecciona automaticamente la estrategia optima y potencia laser
+        basandose en el calentamiento esperado por pase y el margen termico.
+
+        Calcula la potencia maxima segura tal que dT_per_pass < 25% del margen,
+        permitiendo ~4 pases antes de acercarse al limite (con enfriamiento).
+
+        Retorna (strategy, power_factor)
+        """
+        T_amb = self.T_REF
+        margin_K = self.BOILING_POINT_K - T_amb - 5.0  # 5K margen seguridad
+
+        # Calcular dT por unidad de potencia (K/W)
+        geometry = self._base_designer.calculate_zone_geometry()
+        fluid_volume_ml = self._get_effective_volume_ml(geometry['total_volume_ml'])
+        residence_time_s = self._get_residence_time_s(geometry['zone_residence_time_s'])
+        mass_kg = fluid_volume_ml * 1e-6 * self.RHO
+        absorptance = self.base_params.substrate_absorptance
+        fluid_heat_fraction = 0.6
+
+        if mass_kg > 0:
+            dT_per_W = absorptance * fluid_heat_fraction * residence_time_s / (mass_kg * self.CP)
+        else:
+            dT_per_W = 1e6
+
+        # Objetivo: dT por pase < 25% del margen termico
+        max_dT_target = margin_K * 0.25
+        max_power_W = max_dT_target / max(dT_per_W, 1e-10)
+        max_power_mW = max_power_W * 1000.0
+
+        # Power factor relativo a la potencia base
+        base_power = self.base_params.laser_power_mw
+        power_factor = min(1.0, max_power_mW / max(base_power, 1.0))
+
+        # Seleccion de estrategia segun headroom volumetrico
+        H = self.solvent.heat_capacity_J_kgK * margin_K
+
+        if H > 200000:
+            return 'fixed', power_factor
+        elif H > 80000:
+            return 'linear_decay', power_factor
+        else:
+            return 'fixed', power_factor
 
     # ===========================================================================
     #  AJUSTE DINAMICO DE POTENCIA
@@ -2042,6 +2207,7 @@ class MultiStageRecirculationSystem:
           - "fixed": potencia constante
           - "linear_decay": reduce linealmente para compensar acumulacion termica
           - "adaptive": ajusta segun estado energetico y pureza actual
+          - "auto": selecciona automaticamente segun solvente
         """
         if strategy == "fixed":
             return initial_power_mw
@@ -2078,6 +2244,15 @@ class MultiStageRecirculationSystem:
                 power *= overheat_factor
 
             return np.clip(power, min_power_mw, max_power_mw)
+
+        elif strategy == "auto":
+            # Auto-seleccion basada en propiedades del solvente
+            auto_strat, power_factor = self._auto_select_strategy()
+            adjusted_power = initial_power_mw * power_factor
+            return self._adjust_power(
+                auto_strat, pass_number, n_total_passes,
+                adjusted_power, min_power_mw, max_power_mw,
+                energy_state, current_purity, target_purity)
 
         return initial_power_mw
 
@@ -2184,10 +2359,10 @@ class MultiStageRecirculationSystem:
         energy_state = ChamberEnergyState(T_fluid_K=p.temperature_c + 273.15,
                                            T_fluid_initial_K=p.temperature_c + 273.15)
 
-        # Geometria del separador (para calculos de residencia)
+        # Geometria del separador (con override de microcanal si aplica)
         geometry = self._base_designer.calculate_zone_geometry()
-        fluid_volume_ml = geometry['total_volume_ml']
-        residence_time_s = geometry['zone_residence_time_s']
+        fluid_volume_ml = self._get_effective_volume_ml(geometry['total_volume_ml'])
+        residence_time_s = self._get_residence_time_s(geometry['zone_residence_time_s'])
 
         # Concentraciones actuales (van cambiando con cada pasada)
         current_qdots = n_qdots_in
@@ -2273,12 +2448,48 @@ class MultiStageRecirculationSystem:
 
         return results
 
+    def _calculate_qdot_degradation(self, T_fluid_K: float) -> float:
+        """
+        Modelo de degradacion termica de QDots.
+
+        El quantum yield de fluorescencia (y por tanto la absorcion util)
+        decrece con la temperatura por:
+          1. Thermal quenching: kT compite con emision radiativa
+          2. Desorcion de ligandos de superficie a T > 50C
+          3. Agregacion termica a T > 70C
+
+        Modelo: QY(T) = QY_ref * exp(-E_a * (T - T_ref) / (k_B * T * T_ref))
+        Simplificado: factor = exp(-(T - T_ref) / T_char)
+        donde T_char ~ 40K (temperatura caracteristica de quenching)
+
+        Retorna factor [0, 1]: 1.0 = sin degradacion, 0 = totalmente degradado
+        """
+        T_char = 40.0  # K, temperatura caracteristica de quenching termico
+        dT = T_fluid_K - self.T_REF
+        if dT <= 0:
+            return 1.0
+
+        # Degradacion exponencial
+        factor = np.exp(-dT / T_char)
+
+        # Degradacion catastrofica por desorcion de ligandos (>50C sobre ref)
+        if dT > 50.0:
+            factor *= np.exp(-(dT - 50.0) / 10.0)
+
+        return max(0.01, min(1.0, factor))
+
     def _calculate_single_separation_pass(self, laser_power_mw: float,
                                            energy_state: ChamberEnergyState,
                                            excitation_wavelength_nm: float) -> Dict:
         """
         Calcula eficiencias de separacion para una pasada individual,
         teniendo en cuenta el estado energetico acumulado.
+
+        Modelo completo:
+          - Velocidad termoforetica ajustada por S_T(T) y D(T)
+          - Difusion browniana ajustada por T/mu
+          - Degradacion termica de QDots (menor absorcion -> menor fuerza)
+          - Probabilidades de captura dependientes del Peclet efectivo
         """
         p = self.base_params
 
@@ -2289,7 +2500,7 @@ class MultiStageRecirculationSystem:
         ot_grad = self._base_designer.calculate_optothermal_gradient(
             laser_power_mw, p.beam_waist_um)
 
-        # Velocidad termoforetica BASE
+        # Velocidad termoforetica BASE (a T_ref)
         thermo = self._base_designer.calculate_thermophoretic_velocity(
             representative_size_nm, ot_grad['grad_T_K_m'],
             laser_power_mw, p.beam_waist_um)
@@ -2297,8 +2508,16 @@ class MultiStageRecirculationSystem:
 
         # Ajustar por estado energetico acumulado
         # v_thermo = D_T * grad_T = S_T * D_brownian * grad_T
-        # S_T cambia con T, D_brownian cambia con T/mu
+        # S_T cambia con T (baja), D_brownian cambia con T/mu (sube)
+        # El producto S_T * D ~ S_T_factor * D_factor
         v_thermo_adjusted = v_thermo_base * energy_state.soret_factor * energy_state.D_brownian_factor
+
+        # Degradacion termica de QDots: menor absorcion = menor fuerza diferencial
+        degradation = self._calculate_qdot_degradation(energy_state.T_fluid_K)
+        # La degradacion reduce la diferencia entre QDots absorbentes y no-absorbentes
+        # QDots degradados absorben menos -> menos calentamiento local -> menos dS_T
+        v_thermo_qdot = v_thermo_adjusted * (1.0 + degradation * 0.5)  # QDots: base + contribucion absorcion
+        v_thermo_background = v_thermo_adjusted  # Background: solo sustrato
 
         # Difusion browniana ajustada
         brownian = self._base_designer.calculate_brownian_diffusion(representative_size_nm)
@@ -2306,53 +2525,62 @@ class MultiStageRecirculationSystem:
 
         # Sedimentacion (ajustada por viscosidad)
         sed = self._base_designer.calculate_sedimentation(representative_size_nm)
-        viscosity_ratio = VISCOSITY_WATER / max(energy_state.viscosity_Pa_s, 1e-10)
+        viscosity_ratio = self.MU_REF / max(energy_state.viscosity_Pa_s, 1e-10)
         v_sed_adjusted = sed['v_sedimentation_m_s'] * viscosity_ratio
 
-        # Fuerzas opticas
+        # Fuerzas opticas (contribucion menor, tambien degradada)
         laser_forces = self._base_designer.calculate_gradient_force(
             representative_size_nm, laser_power_mw, p.beam_waist_um)
-        v_optical = laser_forces['v_total_optical_m_s']
+        v_optical = laser_forces['v_total_optical_m_s'] * degradation
 
         # Velocidad total ascendente para QDots (absorben)
-        v_up_qdot = v_thermo_adjusted + v_optical
+        v_up_qdot = v_thermo_qdot + v_optical
 
-        # Peclet a escala del beam waist
-        w0_m = p.beam_waist_um * 1e-6
-        Pe_qdot = v_up_qdot * w0_m / max(D_adjusted, 1e-30)
-
-        # Geometria: en modo optotermico usamos microcanal (channel_depth_um)
-        # no la altura macro de la zona (zone_height_mm)
+        # Geometria: microcanal
         geometry = self._base_designer.calculate_zone_geometry()
-        # Distancia de separacion: mitad del microcanal (particulas migran desde
-        # centro del canal hacia el sustrato caliente o lejos de el)
         half_h = (p.channel_depth_um * 1e-6) / 2.0  # ~50 um
-        t_res = geometry['zone_residence_time_s']
+        t_res = self._get_residence_time_s(geometry['zone_residence_time_s'])
 
-        # Probabilidad de captura de QDots (absorben -> migran al colector)
+        # Peclet efectivo: v * L / D (a escala del canal)
+        Pe_qdot = v_up_qdot * half_h / max(D_adjusted, 1e-30)
+
+        # Probabilidad de captura basada en Peclet
+        # Modelo fisico: P = Pe / (1 + Pe) para regimen de Peclet moderado
+        # Esto da: Pe=0 -> P=0, Pe=1 -> P=0.5, Pe=10 -> P=0.91, Pe>>1 -> P~1
+        # Ademas, modulada por el tiempo de residencia vs tiempo de transito
         t_transit = half_h / max(v_up_qdot, 1e-30)
-        ratio = t_res / max(t_transit, 1e-30)
-        P_qdot_capture = min(0.98, 1.0 - np.exp(-max(0, ratio)))
+        time_ratio = min(10.0, t_res / max(t_transit, 1e-30))
 
-        # Probabilidad de arrastre de no-QDots (NO absorben -> solo conveccion residual)
-        # Los no-QDots experimentan termoforesis de fondo (del sustrato) pero
-        # NO tienen la contribucion de absorcion diferencial
-        # Su velocidad es solo ~10-20% de la del QDot absorbente
-        background_fraction = 0.15  # Solo termoforesis de fondo del sustrato
-        v_up_nonqdot = v_thermo_adjusted * background_fraction
+        # Probabilidad combinada: Peclet + tiempo
+        P_peclet = Pe_qdot / (1.0 + Pe_qdot)
+        P_time = 1.0 - np.exp(-max(0, time_ratio))
+        P_qdot_capture = min(0.98, P_peclet * P_time)
+
+        # Degradacion reduce directamente la captura diferencial
+        # QDots degradados se comportan mas como no-QDots
+        P_qdot_capture *= (0.5 + 0.5 * degradation)
+
+        # No-QDots: solo termoforesis de fondo
+        background_fraction = 0.12 * (1.0 + 0.3 * (1.0 - degradation))
+        v_up_nonqdot = v_thermo_background * background_fraction
+        Pe_nonqdot = v_up_nonqdot * half_h / max(D_adjusted, 1e-30)
+        P_nonqdot_peclet = Pe_nonqdot / (1.0 + Pe_nonqdot)
         t_transit_nonqdot = half_h / max(v_up_nonqdot, 1e-30)
-        ratio_nonqdot = t_res / max(t_transit_nonqdot, 1e-30)
-        P_nonqdot_drag = min(0.3, 1.0 - np.exp(-max(0, ratio_nonqdot)))
+        time_ratio_nonqdot = min(10.0, t_res / max(t_transit_nonqdot, 1e-30))
+        P_time_nonqdot = 1.0 - np.exp(-max(0, time_ratio_nonqdot))
+        P_nonqdot_drag = min(0.4, P_nonqdot_peclet * P_time_nonqdot)
 
         return {
             'v_up_qdot_m_s': v_up_qdot,
             'v_up_qdot_um_s': v_up_qdot * 1e6,
             'v_up_nonqdot_m_s': v_up_nonqdot,
             'Pe_qdot': Pe_qdot,
+            'Pe_nonqdot': Pe_nonqdot,
             'D_adjusted_m2_s': D_adjusted,
             'v_sed_adjusted_m_s': v_sed_adjusted,
             'P_qdot_capture': P_qdot_capture,
             'P_nonqdot_drag': P_nonqdot_drag,
+            'degradation_factor': degradation,
             'dT_substrate_K': ot_grad['dT_K'],
             'grad_T_K_m': ot_grad['grad_T_K_m'],
         }
@@ -2403,8 +2631,8 @@ class MultiStageRecirculationSystem:
                                                T_fluid_initial_K=p.temperature_c + 273.15)
 
         geometry = self._base_designer.calculate_zone_geometry()
-        fluid_volume_ml = geometry['total_volume_ml']
-        residence_time_s = geometry['zone_residence_time_s']
+        fluid_volume_ml = self._get_effective_volume_ml(geometry['total_volume_ml'])
+        residence_time_s = self._get_residence_time_s(geometry['zone_residence_time_s'])
 
         # Distribucion de tamanos: modelamos como gaussiana
         # Centro: config.target_size_center_nm
@@ -2631,10 +2859,29 @@ class MultiStageRecirculationSystem:
             n_qdots_after_sep = n_qdots_after_pf
             n_nonqdots_after_sep = n_nonqdots_after_pf
 
+        # ==================== INTER-STAGE COOLING ====================
+        # Heat exchanger entre camaras: enfria el fluido antes del refinamiento
+        # Esto es critico porque la etapa de refinamiento necesita baja T
+        # para maxima selectividad de tamano y minima degradacion
+        inter_stage_cooling = 0.85  # 85% eficiencia de enfriamiento inter-etapa
+        cooled_state = ChamberEnergyState(
+            pass_number=sep_energy_state.pass_number,
+            T_fluid_initial_K=sep_energy_state.T_fluid_initial_K,
+        )
+        cooled_state.dT_accumulated_K = sep_energy_state.dT_accumulated_K * (1.0 - inter_stage_cooling)
+        cooled_state.T_fluid_K = cooled_state.T_fluid_initial_K + cooled_state.dT_accumulated_K
+        cooled_state.energy_deposited_J = sep_energy_state.energy_deposited_J
+        # Recalcular propiedades a T enfriada
+        cooled_state.viscosity_Pa_s = self._viscosity_at_temperature(cooled_state.T_fluid_K)
+        D_ratio = (cooled_state.T_fluid_K / self.T_REF) * (self.MU_REF / cooled_state.viscosity_Pa_s)
+        cooled_state.D_brownian_factor = D_ratio
+        S_T_current = self._soret_at_temperature(cooled_state.T_fluid_K)
+        cooled_state.soret_factor = S_T_current / max(self.S_T_REF, 1e-10)
+
         # ==================== ETAPA 3: REFINAMIENTO ====================
         refinement_results = self.run_quality_refinement(
             refinement_config, n_qdots_after_sep, n_nonqdots_after_sep,
-            sep_energy_state)
+            cooled_state)
         all_stages.append({
             'stage_name': 'REFINAMIENTO DE CALIDAD',
             'stage_type': 'QUALITY_REFINEMENT',
@@ -2659,7 +2906,7 @@ class MultiStageRecirculationSystem:
 
         # Tiempo total estimado
         geometry = self._base_designer.calculate_zone_geometry()
-        t_per_pass = geometry['residence_time_s']
+        t_per_pass = self._get_residence_time_s(geometry['residence_time_s'])
         total_time = total_passes * t_per_pass
         # Agregar tiempos de enfriamiento
         total_time += len(separation_results) * separation_config.cooling_time_s
@@ -2741,6 +2988,16 @@ class MultiStageRecirculationSystem:
         print("\n" + "=" * 90)
         print("  SISTEMA DE RECIRCULACION MULTI-ETAPA PARA CLASIFICACION DE CQDs")
         print("  Separacion maxima calidad: Pre-filtro -> N separaciones -> M refinamientos")
+        print(f"  Solvente: {self.solvent.name} (Cp={self.CP:.0f} J/kgK, "
+              f"rho={self.RHO:.0f} kg/m3, mu={self.MU_REF*1e3:.2f} mPa.s, "
+              f"S_T={self.S_T_REF:.3f} K-1)")
+        if self.microchannel_volume_uL is not None:
+            print(f"  Microcanal: {self.microchannel_volume_uL:.1f} uL/zona "
+                  f"(total={self.microchannel_volume_uL * self.base_params.n_zones:.1f} uL)")
+        print(f"  Flow rate: {self.base_params.flow_rate_ml_min:.3f} mL/min "
+              f"({'microfluídico' if self.base_params.flow_rate_ml_min < 0.5 else 'macro'})")
+        print(f"  Punto ebullicion: {self.solvent.boiling_point_C:.0f} C "
+              f"(margen: {self.solvent.boiling_point_C - self.base_params.temperature_c:.0f} C)")
         print("=" * 90)
 
         for stage_data in o.stages:
@@ -2917,6 +3174,241 @@ class MultiStageRecirculationSystem:
 
 
 # ===============================================================================
+#  OPTIMIZADOR AUTOMATICO
+# ===============================================================================
+
+class RecirculationOptimizer:
+    """
+    Optimizador que encuentra la mejor configuracion de recirculacion
+    para un solvente y geometria dados.
+
+    Busca maximizar: F = pureza * recovery * (1 - thermal_risk)
+    donde thermal_risk = max(0, (T_max - T_safe) / (T_boil - T_safe))
+
+    Parametros de busqueda:
+      - Potencia laser (mW)
+      - Numero de pasadas separacion
+      - Numero de pasadas refinamiento
+      - Estrategia de potencia
+      - Cooling time entre pasadas
+    """
+
+    def __init__(self, solvent: SolventProperties = None,
+                 microchannel_uL: float = None):
+        self.solvent = solvent or SOLVENT_WATER
+        self.microchannel_uL = microchannel_uL
+
+    def _evaluate(self, laser_mw: float, flow_rate: float,
+                  sep_passes: int, ref_passes: int,
+                  strategy: str, cool_time: float,
+                  cool_eff: float) -> Dict:
+        """Evalua una configuracion y retorna metricas"""
+        params = ClassifierParameters(
+            excitation_mode=ExcitationMode.OPTOTHERMAL,
+            laser_power_mw=laser_mw,
+            flow_rate_ml_min=flow_rate,
+        )
+        system = MultiStageRecirculationSystem(
+            params, solvent=self.solvent,
+            microchannel_volume_uL=self.microchannel_uL)
+
+        sep_config = RecirculationStageConfig(
+            stage_type=RecirculationStageType.QDOT_SEPARATION,
+            n_passes=sep_passes,
+            initial_laser_power_mw=laser_mw,
+            power_adjustment_strategy=strategy,
+            min_power_mw=max(5.0, laser_mw * 0.05),
+            max_power_mw=laser_mw * 1.2,
+            cooling_time_s=cool_time,
+            cooling_efficiency=cool_eff,
+            target_purity=0.95,
+        )
+        ref_config = RecirculationStageConfig(
+            stage_type=RecirculationStageType.QUALITY_REFINEMENT,
+            n_passes=ref_passes,
+            initial_laser_power_mw=laser_mw * 0.4,
+            power_adjustment_strategy=strategy,
+            min_power_mw=max(3.0, laser_mw * 0.03),
+            max_power_mw=laser_mw * 0.7,
+            cooling_time_s=cool_time * 1.5,
+            cooling_efficiency=cool_eff,
+            target_purity=0.99,
+            target_size_center_nm=3.0,
+            target_size_tolerance_nm=0.5,
+        )
+
+        output = system.run_full_system(
+            n_total_particles=10000, qdot_fraction=0.05,
+            size_in_range_fraction=0.15,
+            separation_config=sep_config,
+            refinement_config=ref_config,
+        )
+
+        # Metricas
+        T_max_K = 0
+        T_boil_K = self.solvent.boiling_point_C + 273.15
+        T_safe_K = T_boil_K - 15.0  # 15K margen de seguridad
+        degradation_min = 1.0
+
+        for stage in output.stages:
+            for p in stage['passes']:
+                T_max_K = max(T_max_K, p.energy_state.T_fluid_K)
+                # Calcular degradacion
+                deg = system._calculate_qdot_degradation(p.energy_state.T_fluid_K)
+                degradation_min = min(degradation_min, deg)
+
+        thermal_risk = max(0.0, (T_max_K - T_safe_K) / max(T_boil_K - T_safe_K, 1.0))
+        thermal_risk = min(1.0, thermal_risk)
+
+        # Funcion objetivo: pureza * recovery * integridad * (1 - riesgo termico)
+        F = (output.final_purity * output.final_recovery *
+             degradation_min * (1.0 - thermal_risk))
+
+        return {
+            'F': F,
+            'purity': output.final_purity,
+            'recovery': output.final_recovery,
+            'T_max_C': T_max_K - 273.15,
+            'degradation_min': degradation_min,
+            'thermal_risk': thermal_risk,
+            'energy_J': output.total_energy_J,
+            'time_s': output.total_time_s,
+            'passes': output.total_passes,
+            'quality_score': output.quality_score,
+            'output': output,
+            'system': system,
+            # Parametros usados
+            'laser_mw': laser_mw,
+            'flow_rate': flow_rate,
+            'sep_passes': sep_passes,
+            'ref_passes': ref_passes,
+            'strategy': strategy,
+            'cool_time': cool_time,
+            'cool_eff': cool_eff,
+        }
+
+    def optimize(self, max_iterations: int = 200,
+                 flow_rate: float = None) -> Dict:
+        """
+        Busqueda de la mejor configuracion por muestreo aleatorio.
+        Retorna el mejor resultado con todos sus parametros.
+        """
+        np.random.seed(42)
+
+        # Determinar flow rate: macro vs micro
+        if flow_rate is None:
+            if self.microchannel_uL is not None:
+                flow_rate = 0.05  # Microfluídico
+            else:
+                flow_rate = 2.0  # Macro
+
+        # Rango de busqueda de laser adaptado al solvente
+        bp_margin = self.solvent.boiling_point_C - 25.0
+        if bp_margin < 50:
+            laser_range = [20, 40, 60, 80, 100, 120]
+        elif bp_margin < 80:
+            laser_range = [50, 100, 150, 200, 300]
+        else:
+            laser_range = [100, 200, 300, 500, 800]
+
+        search_space = {
+            'laser_mw': laser_range,
+            'sep_passes': [4, 6, 8, 10, 12, 15],
+            'ref_passes': [3, 5, 8, 10],
+            'strategy': ['fixed', 'linear_decay', 'adaptive', 'auto'],
+            'cool_time': [1.0, 2.0, 5.0, 8.0],
+            'cool_eff': [0.1, 0.3, 0.5, 0.7],
+        }
+
+        best = None
+        all_results = []
+
+        for i in range(max_iterations):
+            laser = float(np.random.choice(search_space['laser_mw']))
+            sep = int(np.random.choice(search_space['sep_passes']))
+            ref = int(np.random.choice(search_space['ref_passes']))
+            strat = str(np.random.choice(search_space['strategy']))
+            ct = float(np.random.choice(search_space['cool_time']))
+            ce = float(np.random.choice(search_space['cool_eff']))
+
+            try:
+                result = self._evaluate(laser, flow_rate, sep, ref, strat, ct, ce)
+                all_results.append(result)
+
+                if best is None or result['F'] > best['F']:
+                    best = result
+            except (ValueError, ZeroDivisionError, OverflowError):
+                continue
+
+        return best, all_results
+
+    def print_optimization_report(self, best: Dict, all_results: List[Dict]):
+        """Imprime reporte de optimizacion"""
+        print("\n" + "=" * 100)
+        print("  OPTIMIZACION AUTOMATICA DEL SISTEMA DE RECIRCULACION")
+        print(f"  Solvente: {self.solvent.name} | "
+              f"Canal: {self.microchannel_uL or 'macro'} uL | "
+              f"Evaluaciones: {len(all_results)}")
+        print("=" * 100)
+
+        # Top 5
+        sorted_results = sorted(all_results, key=lambda x: x['F'], reverse=True)
+
+        print(f"\n  TOP 5 CONFIGURACIONES (ordenadas por F = pureza * recovery * integridad * seguridad):")
+        print(f"\n  {'#':<4} {'F':<8} {'Pureza':<9} {'Recup':<9} {'Degradacion':<13} "
+              f"{'T_max':<8} {'Riesgo':<8} {'Laser':<8} {'Sep':<5} {'Ref':<5} "
+              f"{'Estrategia':<12} {'Cool_t':<8} {'Cool_e':<8}")
+        print(f"  {'-' * 105}")
+
+        for i, r in enumerate(sorted_results[:5]):
+            print(f"  {i+1:<4} {r['F']:<8.4f} {r['purity']*100:<8.1f}% {r['recovery']*100:<8.1f}% "
+                  f"{r['degradation_min']:<13.3f} {r['T_max_C']:<7.1f}C {r['thermal_risk']:<8.3f} "
+                  f"{r['laser_mw']:<7.0f}W {r['sep_passes']:<5} {r['ref_passes']:<5} "
+                  f"{r['strategy']:<12} {r['cool_time']:<8.1f} {r['cool_eff']:<8.2f}")
+
+        # Mejor resultado detallado
+        print(f"\n  {'=' * 100}")
+        print(f"  MEJOR CONFIGURACION ENCONTRADA")
+        print(f"  {'=' * 100}")
+        b = best
+        print(f"  Laser:              {b['laser_mw']:.0f} mW")
+        print(f"  Pasadas separacion: {b['sep_passes']}")
+        print(f"  Pasadas refinam.:   {b['ref_passes']}")
+        print(f"  Estrategia:         {b['strategy']}")
+        print(f"  Cooling time:       {b['cool_time']:.1f} s")
+        print(f"  Cooling efficiency: {b['cool_eff']:.2f}")
+        print(f"  Flow rate:          {b['flow_rate']:.3f} mL/min")
+        print(f"  ---")
+        print(f"  Pureza final:       {b['purity']*100:.2f}%")
+        print(f"  Recuperacion:       {b['recovery']*100:.2f}%")
+        print(f"  T maxima:           {b['T_max_C']:.1f} C (bp={self.solvent.boiling_point_C:.0f}C)")
+        print(f"  Degradacion min:    {b['degradation_min']:.3f}")
+        print(f"  Riesgo termico:     {b['thermal_risk']:.3f}")
+        print(f"  F objetivo:         {b['F']:.4f}")
+        print(f"  Pasadas totales:    {b['passes']}")
+        print(f"  Energia total:      {b['energy_J']*1e3:.1f} mJ")
+        print(f"  Tiempo total:       {b['time_s']:.0f} s ({b['time_s']/60:.1f} min)")
+
+        # Analisis de estrategias
+        strat_bests = {}
+        for r in all_results:
+            s = r['strategy']
+            if s not in strat_bests or r['F'] > strat_bests[s]['F']:
+                strat_bests[s] = r
+
+        print(f"\n  MEJOR POR ESTRATEGIA:")
+        print(f"  {'Estrategia':<15} {'F':<8} {'Pureza':<9} {'Recup':<9} "
+              f"{'T_max':<8} {'Degrad':<8} {'Laser':<8}")
+        print(f"  {'-' * 65}")
+        for s in ['adaptive', 'linear_decay', 'fixed']:
+            if s in strat_bests:
+                r = strat_bests[s]
+                print(f"  {s:<15} {r['F']:<8.4f} {r['purity']*100:<8.1f}% "
+                      f"{r['recovery']*100:<8.1f}% {r['T_max_C']:<7.1f}C "
+                      f"{r['degradation_min']:<8.3f} {r['laser_mw']:<7.0f}W")
+
+
+# ===============================================================================
 #  PROGRAMA PRINCIPAL
 # ===============================================================================
 
@@ -2934,13 +3426,20 @@ if __name__ == "__main__":
                         help="Comparar los 3 modos de excitacion lado a lado")
     parser.add_argument("--recirculation", action="store_true",
                         help="Ejecutar sistema multi-etapa con recirculacion")
+    parser.add_argument("--optimize-recirculation", action="store_true",
+                        help="Optimizar parametros del sistema de recirculacion")
     parser.add_argument("--sep-passes", type=int, default=8,
                         help="Pasadas de separacion QDot (default: 8)")
     parser.add_argument("--ref-passes", type=int, default=5,
                         help="Pasadas de refinamiento de calidad (default: 5)")
     parser.add_argument("--power-strategy", type=str, default="adaptive",
-                        choices=["fixed", "linear_decay", "adaptive"],
+                        choices=["fixed", "linear_decay", "adaptive", "auto"],
                         help="Estrategia de ajuste de potencia (default: adaptive)")
+    parser.add_argument("--solvent", type=str, default="water",
+                        choices=["water", "toluene", "hexane", "chloroform"],
+                        help="Solvente del fluido (default: water)")
+    parser.add_argument("--microchannel-uL", type=float, default=None,
+                        help="Volumen de microcanal por zona en uL (default: None = macro)")
     parser.add_argument("--mode", type=str, default="optothermal",
                         choices=["led", "laser", "optothermal"],
                         help="Modo de excitacion: led, laser, optothermal (default)")
@@ -2961,13 +3460,30 @@ if __name__ == "__main__":
     print("  Separacion selectiva: LED / Laser directo / Opto-termico")
     print("=" * 80)
 
-    if args.recirculation:
+    if args.optimize_recirculation:
+        solvent = SOLVENTS.get(args.solvent, SOLVENT_WATER)
+        print(f"\n-> Optimizando sistema de recirculacion...")
+        print(f"   Solvente: {solvent.name} | Microcanal: {args.microchannel_uL or 'macro'}")
+
+        optimizer = RecirculationOptimizer(solvent, args.microchannel_uL)
+        best, all_results = optimizer.optimize(max_iterations=300)
+        optimizer.print_optimization_report(best, all_results)
+
+        # Ejecutar y mostrar el mejor resultado
+        if best and best.get('system'):
+            best['system'].print_recirculation_report()
+            best['system'].print_energy_evolution()
+
+    elif args.recirculation:
+        solvent = SOLVENTS.get(args.solvent, SOLVENT_WATER)
         print(f"\n-> Sistema multi-etapa con recirculacion")
         print(f"   Separacion: {args.sep_passes} pasadas | Refinamiento: {args.ref_passes} pasadas")
-        print(f"   Estrategia de potencia: {args.power_strategy}\n")
+        print(f"   Estrategia de potencia: {args.power_strategy}")
+        print(f"   Solvente: {solvent.name} | Microcanal: {args.microchannel_uL or 'macro'}uL\n")
 
         params = ClassifierParameters(excitation_mode=ExcitationMode.OPTOTHERMAL)
-        system = MultiStageRecirculationSystem(params)
+        system = MultiStageRecirculationSystem(
+            params, solvent=solvent, microchannel_volume_uL=args.microchannel_uL)
 
         sep_config = RecirculationStageConfig(
             stage_type=RecirculationStageType.QDOT_SEPARATION,
