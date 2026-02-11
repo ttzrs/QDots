@@ -1,60 +1,92 @@
-# QDots: Síntesis de Carbon Quantum Dots mediante Micro-reactores de Plasma
+# QDots: Sintesis de Carbon Quantum Dots mediante Milirreactor de Plasma Frio
 
-Este proyecto integra simulación cuántica, diseño paramétrico de ingeniería y dinámica de fluidos computacional para la síntesis automatizada de Carbon Quantum Dots (CQDs) a partir de materia orgánica (purines de cerdo) utilizando plasma de descarga de barrera dieléctrica (DBD).
+Produccion automatizada de CQDs a partir de materia organica (purines de cerdo) utilizando plasma frio DBD con barrera catalitica de TiO2, clasificacion optica en paralelo y recirculacion de waste.
 
 ## Estructura del Proyecto
 
-### 1. Simulación Cuántica (Módulo Químico)
-Utiliza el algoritmo **VQE (Variational Quantum Eigensolver)** para predecir las propiedades ópticas (Gap HOMO-LUMO) de los clústeres de carbono dopados con nitrógeno.
-- `qdot_vqe.py`: Implementación base con Tangelo y PySCF.
-- `qdot_vqe_gpu.py`: Versión optimizada para GPU utilizando Qulacs (vía Docker).
-- `chem_backend/tangelo_interface.py`: Interfaz para el gemelo digital químico.
+### 1. Milirreactor DBD (Principal)
 
-### 2. Diseño del Reactor (Ingeniería)
-Diseño paramétrico y optimización del micro-reactor DBD para fabricación mediante impresión 3D (DLP/Cerámica).
-- `reactor_design.py`: Motor de diseño paramétrico, optimización de geometría, materiales y parámetros eléctricos.
-- `reactor_3d_cadquery.py` / `reactor_3d.scad`: Generación de modelos CAD para fabricación.
-- `reactor_optimized.json`: Parámetros de diseño exportados.
+Escala el microreactor validado a dimensiones milimetricas con 4 topologias. Configuracion principal: multi-channel 8x300mm con TiO2 anatase como barrera dielectrica y fotocatalizador. Plasma frio no-termico (100 ns pulsos).
 
-### 3. Simulación de Fluidos (OpenFOAM)
-Ubicado en `openfoam_reactor/`, contiene las simulaciones de flujo laminar y transporte de especies dentro del reactor.
-- `run_openfoam.sh`: Script de ejecución de la simulación.
-- `bayesian_opt/`: Resultados de optimización de forma del canal.
+- `reactor_scaleup.py`: Milirreactor escalado (4 topologias, plasma frio, TiO2, enfriamiento)
+- `reactor_design.py`: Microreactor base (diseno parametrico, ~50 mg/h)
+- `reactor_3d_cadquery.py` / `reactor_3d.scad`: Modelos CAD
+- `reactor_optimized.json`: Parametros optimizados del microreactor
 
-### 4. Control y Operación
-- `reactor_control.py`: Lógica de control en tiempo real para el bucle de realimentación sensor-válvula.
-- `qdot_final.py`: Integración completa del sistema.
+### 2. Clasificacion y Produccion
 
-## Tecnologías Principales
-- **Simulación Cuántica**: Tangelo, PySCF, Qulacs.
-- **Ingeniería/CAD**: CadQuery, OpenSCAD.
-- **CFD**: OpenFOAM 11.
-- **Lenguaje**: Python 3.x.
-- **Infraestructura**: Docker (para soporte GPU y OpenFOAM).
+Sistema de clasificacion optica por termoforesis con cascada inline y clasificadores en paralelo.
+
+- `parallel_classifier.py`: Sistema completo (N clasificadores paralelos + waste recirculation + economia)
+- `continuous_production.py`: Cascada inline (reactor + clasificador al mismo flujo)
+- `classifier_design.py`: Diseno parametrico del clasificador (3 modos: LED, laser, opto-termico)
+- `classifier_3d_cadquery.py` / `classifier_3d.scad`: Modelos CAD del clasificador
+
+### 3. Simulacion Cuantica (VQE)
+
+Algoritmo VQE para predecir propiedades opticas (Gap HOMO-LUMO) de clusteres de carbono dopados con nitrogeno. Define el setpoint del sensor optico.
+
+- `qdot_vqe.py`: Implementacion base con Tangelo y PySCF
+- `qdot_vqe_gpu.py`: Version GPU con Qulacs (Docker)
+- `qdot_vqe_24q.py`: Simulacion extendida a 24 qubits
+- `qdot_vqe_pennylane.py`: Implementacion con PennyLane
+- `qdot_vqe_benchmark.py`: Benchmarks entre backends
+- `cqd_literature_model.py`: Modelo basado en literatura
+- `chem_backend/tangelo_interface.py`: Interfaz del gemelo digital quimico
+
+### 4. Simulacion de Fluidos (OpenFOAM)
+
+Ubicado en `openfoam_reactor/`. Simulaciones de flujo laminar y optimizacion bayesiana de geometria.
+
+- `run_openfoam.sh`: Ejecucion de simulacion
+- `scripts/bayesian_optimization.py`: Optimizacion de forma del canal
+- `scripts/pinn_pytorch.py`: Physics-Informed Neural Network
+
+### 5. Control y Operacion
+
+- `reactor_control.py`: Control en tiempo real (reactor + clasificador + laser)
+- `qdot_final.py`: Integracion completa del sistema
+
+## Tecnologias
+
+- **Simulacion cuantica**: Tangelo, PySCF, Qulacs, PennyLane
+- **CAD**: CadQuery, OpenSCAD
+- **CFD**: OpenFOAM 11
+- **ML/Optimizacion**: PyTorch (PINN), scikit-optimize (Bayesian)
+- **Lenguaje**: Python 3.x
+- **Infra**: Docker (GPU + OpenFOAM)
 
 ## Comandos Clave
 
-### Ejecutar Simulación VQE (CPU)
 ```bash
-python qdot_vqe.py
-```
+# Sistema completo (milirreactor + 50 clasificadores paralelos)
+python parallel_classifier.py
 
-### Ejecutar Simulación VQE (GPU)
-```bash
-./run_gpu.sh
-```
+# Milirreactor: comparar topologias
+python reactor_scaleup.py
 
-### Optimizar Diseño del Reactor
-```bash
+# Produccion continua: cascada inline
+python continuous_production.py
+
+# Microreactor base
 python reactor_design.py --optimize --production-target 100
-```
 
-### Ejecutar Simulación OpenFOAM
-```bash
+# Clasificador optico
+python classifier_design.py --design --mode optothermal
+
+# VQE (CPU)
+python qdot_vqe.py
+
+# VQE (GPU)
+./run_gpu.sh
+
+# CFD
 cd openfoam_reactor && ./run_openfoam.sh
 ```
 
-## Convenciones de Desarrollo
-- **Gemelo Digital**: Todas las decisiones de diseño físico deben estar respaldadas por simulaciones previas en Tangelo (química) u OpenFOAM (fluidos).
-- **Materiales**: Preferencia por Alúmina o resinas de alta temperatura debido a la naturaleza del plasma DBD.
-- **Control**: El setpoint del sensor óptico se deriva directamente del gap energético calculado en los scripts VQE.
+## Convenciones
+
+- **Gemelo Digital**: Todas las decisiones de diseno fisico deben estar respaldadas por simulaciones previas en Tangelo (quimica) u OpenFOAM (fluidos).
+- **Materiales**: TiO2 anatase como barrera dielectrica principal. Resinas de alta temperatura como alternativa.
+- **Control**: El setpoint del sensor optico se deriva del gap energetico calculado en los scripts VQE.
+- **Economia**: Precio de referencia 30 EUR/g para calculo de payback.

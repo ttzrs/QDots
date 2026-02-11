@@ -1,65 +1,102 @@
 # QDots
 
-Síntesis automatizada de **Carbon Quantum Dots (CQDs)** a partir de purines de cerdo mediante un milirreactor de plasma frío (DBD), guiado por un gemelo digital cuántico.
+Sintesis automatizada de **Carbon Quantum Dots (CQDs)** a partir de purines de cerdo mediante un milirreactor de plasma frio (DBD) con barrera catalitica de TiO2, clasificacion optica en paralelo y recirculacion de waste. Guiado por un gemelo digital cuantico (VQE).
 
-## Concepto
+## Produccion
 
-El sistema convierte materia orgánica residual (purines) en nanomateriales fluorescentes de alto valor. Un plasma de descarga de barrera dieléctrica (DBD) fragmenta la materia orgánica, genera radicales de carbono y los recombina en puntos cuánticos con emisión óptica controlada (~450 nm, azul).
-
-La clave es que **ningún parámetro se elige por ensayo y error**: cada decisión de diseño (geometría del canal, voltaje, tiempo de residencia, setpoint del sensor) se deriva de simulaciones cuánticas (VQE) y fluidodinámicas (CFD) previas.
-
-```
-Purín → [Pre-tratamiento] → [Reactor DBD] → [Clasificador Óptico] → Producto
-                                    ↑              │                       ↑
-                              Gemelo Digital   3 zonas LED          Flotabilidad óptica
-                           (Tangelo + OpenFOAM)    ↓               (fotoforesis/fototérmica)
-                                         Excitación λ → QDots suben → Colección arriba
-```
+| Metrica | Valor |
+|---------|-------|
+| Produccion bruta (reactor) | **505 mg/h** |
+| Produccion neta (purificada) | **495 mg/h** |
+| Produccion diaria | **11.9 g/dia** |
+| Pureza | **99.7%** |
+| Emision | **460 nm** (azul, en spec) |
+| Recovery clasificacion | **91%** |
+| Payback estimado | **38 dias** (@30 EUR/g) |
 
 ## Arquitectura
 
-### 1. Simulación Cuántica (VQE)
+```
+Purin -> [Pre-tratamiento] -> [Milirreactor DBD] -> [Manifold] -> [50x Clasificadores] -> Producto
+                                     |                                      |
+                               MC 8x300mm                           0.1 mL/min c/u
+                               TiO2 anatase                         800 mW laser
+                               Plasma frio 100ns                    4S + 3WR + 2R
+                               5 mL/min                                    |
+                                     |                                     v
+                                     +<---- 80% waste recirculado ---  WASTE
+                                                                       20% -> fertilizante
+```
 
-Calcula el gap HOMO-LUMO de clústeres de carbono dopados con nitrógeno para predecir la longitud de onda de emisión. Ese valor define el setpoint del sensor óptico del reactor.
+El milirreactor multi-canal (8 canales x 300 mm) con barrera dielectrica de TiO2 anatase opera con plasma frio (DBD, pulsos de 100 ns). Produce 505 mg/h de CQDs a 5 mL/min. 50 clasificadores opticos en paralelo purifican el producto con 91% de recovery. El 80% del waste se recircula al reactor (boost 1.08x en estado estacionario).
 
-| Script | Descripción |
+## Modulos
+
+### 1. Milirreactor DBD (principal)
+
+Escala el microreactor validado a dimensiones milimetricas con 4 topologias. La configuracion principal es multi-channel con TiO2 como barrera dielectrica estructural + catalizador.
+
+| Script | Descripcion |
 |--------|-------------|
-| `qdot_vqe.py` | Implementación base con Tangelo + PySCF |
-| `qdot_vqe_gpu.py` | Versión GPU con Qulacs (Docker) |
-| `qdot_vqe_24q.py` | Simulación extendida a 24 qubits |
-| `qdot_vqe_pennylane.py` | Implementación alternativa con PennyLane |
+| `reactor_scaleup.py` | **Milirreactor**: 4 topologias (falling film, multi-channel, annular, bubble column), plasma frio, TiO2, enfriamiento activo |
+| `reactor_design.py` | Microreactor base: diseno parametrico y optimizacion (~50 mg/h) |
+| `reactor_3d_cadquery.py` | Generacion de modelos CAD (CadQuery) |
+| `reactor_3d.scad` / `reactor_body.scad` / `reactor_electrodes.scad` | Modelos OpenSCAD |
+| `reactor_optimized.json` | Parametros optimizados del microreactor base |
+
+**Especificaciones del milirreactor (multi-channel 8x300mm):**
+- Topologia: 8 canales paralelos, 2 mm ancho x 0.5 mm alto x 300 mm largo
+- Barrera dielectrica: TiO2 anatase (epsilon_r = 40, sinergia plasma-fotocatalisis)
+- Plasma: DBD frio (Te ~1.5 eV, Tgas < 60 C, pulsos 100 ns)
+- Flujo: 5 mL/min, energia: 27 W
+- Produccion: **505 mg/h** a **460 nm**
+- Enfriamiento: activo (serpentin de refrigerante)
+
+### 2. Clasificacion y Produccion
+
+Sistema de clasificacion optica por termoforesis (efecto Soret) con cascada inline y clasificadores en paralelo.
+
+| Script | Descripcion |
+|--------|-------------|
+| `parallel_classifier.py` | **Sistema completo**: N clasificadores paralelos + waste recirculation + economia |
+| `continuous_production.py` | Cascada inline: reactor + clasificador al mismo flujo |
+| `classifier_design.py` | Diseno parametrico del clasificador optico (3 modos: LED, laser, opto-termico) |
+| `classifier_3d_cadquery.py` | Modelo 3D del clasificador (CadQuery) |
+| `classifier_3d.scad` | Modelo 3D OpenSCAD |
+
+**Clasificador optico (modo opto-termico):**
+- Principio: laser focalizado sobre sustrato Au (50 nm) genera gradiente termico (~10^6 K/m)
+- Efecto Soret: CQDs migran por termoforesis diferencial (Pe >= 1)
+- Cascada por clasificador: PF + 4 sep (800 mW) + 3 waste recapture + 2 refinamiento = 10 camaras
+- 50 clasificadores en paralelo absorben los 5 mL/min del reactor (0.1 mL/min c/u)
+- Recovery: 91%, pureza: 99.7%
+- Waste recirculation: 80% del waste vuelve al reactor (boost 1.08x estacionario)
+
+### 3. Simulacion Cuantica (VQE)
+
+Calcula el gap HOMO-LUMO de clusteres de carbono dopados con nitrogeno para predecir la longitud de onda de emision. Define el setpoint del sensor optico.
+
+| Script | Descripcion |
+|--------|-------------|
+| `qdot_vqe.py` | Implementacion base con Tangelo + PySCF |
+| `qdot_vqe_gpu.py` | Version GPU con Qulacs (Docker) |
+| `qdot_vqe_24q.py` | Simulacion extendida a 24 qubits |
+| `qdot_vqe_pennylane.py` | Implementacion alternativa con PennyLane |
 | `qdot_vqe_benchmark.py` | Benchmarks comparativos entre backends |
 | `cqd_literature_model.py` | Modelo basado en datos de literatura |
-| `chem_backend/tangelo_interface.py` | Interfaz del gemelo digital químico |
+| `chem_backend/tangelo_interface.py` | Interfaz del gemelo digital cuantico |
 
-### 2. Diseño del Reactor
+### 4. Simulacion CFD (OpenFOAM)
 
-Diseño paramétrico del milirreactor DBD para fabricación en impresión 3D (DLP/cerámica).
-
-| Script | Descripción |
-|--------|-------------|
-| `reactor_design.py` | Motor de diseño paramétrico y optimización |
-| `reactor_3d_cadquery.py` | Generación de modelos CAD (CadQuery) |
-| `reactor_3d.scad` / `reactor_body.scad` / `reactor_electrodes.scad` | Modelos OpenSCAD |
-| `reactor_optimized.json` | Parámetros optimizados exportados |
-
-**Parámetros de diseño actuales** (de `reactor_optimized.json`):
-- Canal serpentina: 3.0 mm ancho, 1.0 mm alto, 250 mm longitud, 6 vueltas
-- Electrodos de cobre embebidos, gap de 1.0 mm
-- Dieléctrico: resina de alta temperatura, 0.8 mm
-- Producción estimada: **~30 mg/h** a **~463 nm**
-
-### 3. Simulación CFD (OpenFOAM)
-
-Simulación de flujo laminar y optimización bayesiana de la geometría del canal.
+Simulacion de flujo laminar y optimizacion bayesiana de la geometria del canal.
 
 ```
 openfoam_reactor/
 ├── 0/                  # Condiciones iniciales
 ├── constant/           # Propiedades de transporte y malla
-├── system/             # Configuración del solver (simpleFoam)
-├── stl/                # Geometrías RGB (reactores azul, verde, rojo)
-├── scripts/            # Optimización bayesiana y PINN
+├── system/             # Configuracion del solver (simpleFoam)
+├── stl/                # Geometrias RGB (reactores azul, verde, rojo)
+├── scripts/            # Optimizacion bayesiana y PINN
 │   ├── bayesian_optimization.py
 │   ├── optimize_*.py   # Optimizadores por color/calidad
 │   ├── pinn_pytorch.py # Physics-Informed Neural Network
@@ -67,91 +104,44 @@ openfoam_reactor/
 └── run_openfoam.sh
 ```
 
-### 4. Clasificador Optofluidico (Post-reactor)
+### 5. Control y Operacion
 
-Separación selectiva de CQDs con **tres modos de excitación** implementados y comparados cuantitativamente:
-
-| Modo | Mecanismo | Pe (Péclet) | Viabilidad |
-|------|-----------|:-----------:|:----------:|
-| **LED** | Fuerzas fototérmicas/fotofórica directas | ~0.0002 | No viable |
-| **Láser directo** | Fuerzas ópticas focalizadas (gradiente + radiación) | ~0.0001 | No viable |
-| **Opto-térmico** | Láser + sustrato Au → termoforesis (efecto Soret) | **~1-10** | **Viable** |
-
-El análisis demuestra que las fuerzas ópticas directas (LED o láser) son ~10 órdenes de magnitud insuficientes vs difusión browniana para CQDs de 2-5 nm. El modo opto-térmico (láser 500 mW focalizado a 10 μm sobre película de oro) genera gradientes térmicos macroscópicos (~10⁶ K/m) que producen termoforesis con Pe ≥ 1.
-
-```
-  Modo Opto-térmico (VIABLE):
-
-      Fibra óptica (láser)           ← Láser focalizado (500 mW)
-            ↓
-  +---------|---------------------+
-  |  [=====Puerto superior=====] |  ← Colección QDots (arriba)
-  |                               |
-  |    ←--- termoforesis ---→     |  ← QDots migran por gradiente térmico
-  |    ~~~~~~~~~~~~~~~~~~~~~~~~   |  ← ∇T ~ 10⁶ K/m
-  |  [###Sustrato Au (50nm)####]  |  ← Película de oro (calentamiento)
-  |  [=====Puerto inferior======] |  ← Colección debris (abajo)
-  +-------------------------------+
-
-  Selectividad: QDots absorbentes generan calentamiento local adicional
-                → coeficiente de Soret diferencial → acumulación diferencial
-```
-
-| Script | Descripción |
+| Script | Descripcion |
 |--------|-------------|
-| `classifier_design.py` | Diseño paramétrico con 3 modos (LED, láser, opto-térmico) + comparación |
-| `classifier_3d_cadquery.py` | Modelo 3D CadQuery (LED o fibra óptica + sustrato Au) |
-| `classifier_3d.scad` | Modelo 3D OpenSCAD con modo LED/opto-térmico |
-
-**Especificaciones del clasificador (modo opto-térmico):**
-- 3 zonas con láser focalizado: 520 nm / 405 nm / 365 nm
-- Potencia láser: 500 mW, beam waist: 10 μm
-- Sustrato: película de oro (50 nm), absorptancia: 0.40
-- Gradiente térmico: ~10⁷ K/m → velocidad termoforética ~15-120 μm/s
-- Potencial de atrapamiento: ~5.8 kT (estable)
-- Control de temperatura del sustrato (máx 80°C)
-
-### 5. Control y Operación
-
-| Script | Descripción |
-|--------|-------------|
-| `reactor_control.py` | Control del reactor + clasificador óptico (ReactorController + ClassifierController) |
-| `qdot_final.py` | Integración completa del sistema |
+| `reactor_control.py` | Control del reactor + clasificador optico (ReactorController + ClassifierController) |
+| `qdot_final.py` | Integracion completa del sistema |
 
 ## Uso
 
 ```bash
-# Simulación VQE (CPU)
-python qdot_vqe.py
+# === SISTEMA COMPLETO (milirreactor + clasificadores paralelos) ===
+python parallel_classifier.py                                  # Default: MC 8ch + 50 clasificadores
+python parallel_classifier.py --optimize                       # Grid search
+python parallel_classifier.py --sweep-recovery                 # Comparar parametros
+python parallel_classifier.py --no-recirculation               # Sin waste loop
+python parallel_classifier.py --diagram                        # Diagrama de arquitectura
 
-# Simulación VQE (GPU, requiere Docker)
-./run_gpu.sh
+# === MILIRREACTOR (reactor escalado) ===
+python reactor_scaleup.py                                      # Comparar 4 topologias
+python reactor_scaleup.py --topology multi_channel --flow 5    # MC especifico
+python reactor_scaleup.py --optimize --target 500              # Optimizar para 500 mg/h
 
-# Optimizar diseño del reactor
-python reactor_design.py --optimize --production-target 100
+# === PRODUCCION CONTINUA (reactor + cascada inline) ===
+python continuous_production.py                                # Optimizar flujo + volumen
+python continuous_production.py --flow 0.1 --stage-vol 5       # Evaluar punto
 
-# Clasificador: comparar los 3 modos de excitación
-python classifier_design.py --compare
+# === MICROREACTOR BASE ===
+python reactor_design.py --optimize --production-target 100    # Optimizar micro
 
-# Clasificador: diseño opto-térmico (modo por defecto, viable)
-python classifier_design.py --design --mode optothermal
+# === CLASIFICADOR OPTICO ===
+python classifier_design.py --design --mode optothermal        # Diseno opto-termico
+python classifier_design.py --optimize --mode optothermal      # Optimizar
 
-# Clasificador: diseño LED (baseline, demuestra que no funciona)
-python classifier_design.py --design --mode led
+# === SIMULACION VQE ===
+python qdot_vqe.py                                             # CPU
+./run_gpu.sh                                                   # GPU (Docker)
 
-# Clasificador: diseño láser directo (mejora insuficiente)
-python classifier_design.py --design --mode laser
-
-# Clasificador: optimización
-python classifier_design.py --optimize --mode optothermal
-
-# Vista previa 3D (modo opto-térmico)
-python classifier_3d_cadquery.py --preview --mode optothermal
-
-# Demo del controlador (reactor + clasificador con control láser)
-python reactor_control.py
-
-# Simulación CFD
+# === CFD ===
 cd openfoam_reactor && ./run_openfoam.sh
 ```
 
@@ -163,10 +153,10 @@ docker compose -f docker-compose.gpu.yml up
 
 ## Stack
 
-- **Simulación cuántica**: Tangelo, PySCF, Qulacs, PennyLane
+- **Simulacion cuantica**: Tangelo, PySCF, Qulacs, PennyLane
 - **CAD**: CadQuery, OpenSCAD
 - **CFD**: OpenFOAM 11
-- **ML/Optimización**: PyTorch (PINN), scikit-optimize (Bayesian)
+- **ML/Optimizacion**: PyTorch (PINN), scikit-optimize (Bayesian)
 - **Lenguaje**: Python 3.x
 - **Infra**: Docker (GPU + OpenFOAM)
 
@@ -174,13 +164,17 @@ docker compose -f docker-compose.gpu.yml up
 
 | Componente | Estado | Siguiente paso |
 |:-----------|:------:|:---------------|
-| Simulación VQE | Completada | Validar con clústeres de 24+ qubits en GPU |
-| Diseño CAD reactor | Optimizado | Imprimir en resina de alta temperatura |
-| Simulación CFD | Validada | Verificar con fluidos no-newtonianos |
-| Clasificador óptico | 3 modos implementados | Modo opto-térmico viable (Pe~1-10); LED y láser directo descartados |
-| Lógica de control | Implementada + control láser | Conectar a actuadores físicos (reactor + clasificador + láser) |
-| Hardware | Pendiente | Fabricar reactor + clasificador e integrar electrónica |
+| Milirreactor DBD (MC 8ch, TiO2) | Simulado (505 mg/h) | Fabricar prototipo fisico |
+| Plasma frio (non-thermal DBD) | Modelado | Validar Te/Tgas experimentalmente |
+| Clasificadores paralelos (50x) | Simulado (91% recovery) | Fabricar primer clasificador chip |
+| Waste recirculation loop | Modelado (boost 1.08x) | Implementar manifold + bomba peristaltica |
+| Microreactor base | Optimizado (~50 mg/h) | Base para escalar al milirreactor |
+| Simulacion VQE | Completada | Validar con clusteres 24+ qubits en GPU |
+| Simulacion CFD | Validada | Verificar con fluidos no-newtonianos |
+| Clasificador optico (diseno) | 3 modos implementados | Modo opto-termico viable (Pe~1-10) |
+| Control y operacion | Implementado | Conectar a actuadores fisicos |
+| Hardware | Pendiente | Fabricar milirreactor + clasificadores |
 
 ## Licencia
 
-Proyecto de investigación. Contactar al autor para uso o colaboración.
+Proyecto de investigacion. Contactar al autor para uso o colaboracion.
