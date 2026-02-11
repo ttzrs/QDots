@@ -49,6 +49,13 @@ class ValvePosition(Enum):
     WASTE = "waste"           # Desechar (partículas grandes o contaminadas)
 
 
+class ExcitationMode(Enum):
+    """Modo de excitacion del clasificador"""
+    LED = "led"
+    LASER_DIRECT = "laser_direct"
+    OPTOTHERMAL = "optothermal"
+
+
 @dataclass
 class SensorReading:
     """Lectura del sensor de fluorescencia"""
@@ -288,6 +295,7 @@ DEFAULT_ZONE_CONFIG = [
         'name': 'QDots rojos (3.5-5.0 nm)',
         'led_wavelength_nm': 520,
         'led_power_mw': 200,
+        'laser_power_mw': 500,
         'size_range_nm': (3.5, 5.0),
         'emission_range_nm': (550, 700),
     },
@@ -296,6 +304,7 @@ DEFAULT_ZONE_CONFIG = [
         'name': 'QDots azules (2.5-3.5 nm)',
         'led_wavelength_nm': 405,
         'led_power_mw': 200,
+        'laser_power_mw': 500,
         'size_range_nm': (2.5, 3.5),
         'emission_range_nm': (450, 550),
     },
@@ -304,6 +313,7 @@ DEFAULT_ZONE_CONFIG = [
         'name': 'QDots UV (1.5-2.5 nm)',
         'led_wavelength_nm': 365,
         'led_power_mw': 200,
+        'laser_power_mw': 500,
         'size_range_nm': (1.5, 2.5),
         'emission_range_nm': (350, 450),
     },
@@ -335,12 +345,16 @@ class ClassifierController:
         reactor_controller: 'ReactorController' = None,
         min_intensity: float = INTENSITY_THRESHOLD,
         quantum_yield: float = 0.4,
+        excitation_mode: ExcitationMode = ExcitationMode.OPTOTHERMAL,
+        max_substrate_temp_c: float = 80.0,
     ):
         self.n_zones = n_zones
         self.zone_config = zone_config or DEFAULT_ZONE_CONFIG
         self.reactor_ctrl = reactor_controller or ReactorController()
         self.min_intensity = min_intensity
         self.quantum_yield = quantum_yield
+        self.excitation_mode = excitation_mode
+        self.max_substrate_temp_c = max_substrate_temp_c
 
         # Construir especificaciones por zona
         self.zone_specs = self._build_zone_specs()
@@ -349,6 +363,8 @@ class ClassifierController:
         self.top_port_states = ['idle'] * n_zones    # QDots
         self.bottom_port_states = ['idle'] * n_zones  # Debris
         self.led_powers = [zc.get('led_power_mw', 200) for zc in self.zone_config[:n_zones]]
+        self.laser_powers = [zc.get('laser_power_mw', 500) for zc in self.zone_config[:n_zones]]
+        self.substrate_temps = [25.0] * n_zones
 
         # Historial por zona
         self.zone_histories = [[] for _ in range(n_zones)]
@@ -454,6 +470,59 @@ class ClassifierController:
         self.zone_histories[zone_index].append(result)
         return result
 
+    def process_laser_control(
+        self,
+        zone_index: int,
+        substrate_temp_c: float,
+        bottom_intensity: float,
+    ) -> dict:
+        """
+        Controla potencia del laser por zona en modo opto-termico.
+
+        Logica:
+        - Si sensor abajo detecta QDots -> aumentar potencia laser
+        - Si temperatura del sustrato > max -> reducir potencia
+        - Mantener temperatura en rango optimo (40-80 C)
+        """
+        current_power = self.laser_powers[zone_index]
+        self.substrate_temps[zone_index] = substrate_temp_c
+
+        actions = []
+        new_power = current_power
+
+        # Seguridad termica: no exceder temperatura maxima
+        if substrate_temp_c > self.max_substrate_temp_c:
+            reduction = (substrate_temp_c - self.max_substrate_temp_c) / self.max_substrate_temp_c
+            new_power = current_power * max(0.3, 1.0 - reduction)
+            actions.append(f"REDUCIR laser {current_power:.0f}->{new_power:.0f} mW "
+                          f"(T_sustrato={substrate_temp_c:.1f}C > {self.max_substrate_temp_c}C)")
+
+        # Si hay QDots escapando por abajo, aumentar potencia
+        elif bottom_intensity >= self.min_intensity:
+            increase = min(1.5, 1.0 + bottom_intensity)
+            new_power = min(1000.0, current_power * increase)  # Max 1W
+            actions.append(f"AUMENTAR laser {current_power:.0f}->{new_power:.0f} mW "
+                          f"(QDots detectados abajo, I={bottom_intensity:.2f})")
+
+        # Rango optimo de temperatura para termoforesis
+        elif substrate_temp_c < 40.0:
+            new_power = min(1000.0, current_power * 1.1)
+            actions.append(f"AUMENTAR laser {current_power:.0f}->{new_power:.0f} mW "
+                          f"(T_sustrato={substrate_temp_c:.1f}C < 40C, suboptimo)")
+        else:
+            actions.append(f"MANTENER laser {current_power:.0f} mW "
+                          f"(T_sustrato={substrate_temp_c:.1f}C, optimo)")
+
+        self.laser_powers[zone_index] = new_power
+
+        return {
+            'zone': zone_index,
+            'previous_power_mw': current_power,
+            'new_power_mw': new_power,
+            'substrate_temp_c': substrate_temp_c,
+            'actions': actions,
+        }
+
     def scan_all_zones(self, readings: list) -> list:
         """
         Procesa lecturas de todas las zonas simultaneamente.
@@ -487,6 +556,23 @@ class ClassifierController:
                   f"{spec['name']:<28}{lambda_str:<16}{top_state:<8}{bot_state:<8}|")
 
         print("  +" + "-" * 76 + "+")
+
+        if self.excitation_mode == ExcitationMode.OPTOTHERMAL:
+            print(f"  |  {'--- Modo Opto-termico (laser + sustrato Au) ---':^76}|")
+            print(f"  |  {'Zona':<6}{'Laser (mW)':<14}{'T_sustrato (C)':<18}{'Estado':<38}|")
+            print("  +" + "-" * 76 + "+")
+            for i in range(self.n_zones):
+                temp = self.substrate_temps[i]
+                if temp > self.max_substrate_temp_c:
+                    status = "ALERTA: T excedida"
+                elif temp > 60:
+                    status = "Optimo"
+                elif temp > 40:
+                    status = "Aceptable"
+                else:
+                    status = "Suboptimo (baja T)"
+                print(f"  |  {i+1:<6}{self.laser_powers[i]:<14.0f}{temp:<18.1f}{status:<38}|")
+            print("  +" + "-" * 76 + "+")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -609,7 +695,7 @@ if __name__ == "__main__":
     print("  CLASIFICADOR POR FLOTABILIDAD OPTICA - DEMO")
     print("=" * 70)
 
-    classifier = ClassifierController(reactor_controller=controller)
+    classifier = ClassifierController(reactor_controller=controller, excitation_mode=ExcitationMode.OPTOTHERMAL)
     classifier.print_classifier_status()
 
     # Simular lecturas de sensores por zona
@@ -634,3 +720,21 @@ if __name__ == "__main__":
         print(f"      Abajo:  {result['bottom_reason']}")
         if result['led_power_adjustment'] != 1.0:
             print(f"      -> Ajustar potencia LED: x{result['led_power_adjustment']:.1f}")
+
+    # Demo del control laser (modo opto-termico)
+    if classifier.excitation_mode == ExcitationMode.OPTOTHERMAL:
+        print("\n\n  --- Control de potencia laser (modo opto-termico) ---")
+        laser_scenarios = [
+            # (zone, substrate_temp, bottom_intensity)
+            (0, 55.0, 0.02),   # Temperatura OK, sin fuga
+            (1, 75.0, 0.18),   # Temperatura alta, QDots escapando
+            (2, 85.0, 0.01),   # Temperatura excedida
+        ]
+        for zone_idx, temp, bottom_I in laser_scenarios:
+            result = classifier.process_laser_control(zone_idx, temp, bottom_I)
+            print(f"\n    Zona {zone_idx + 1}:")
+            for action in result['actions']:
+                print(f"      {action}")
+
+        print()
+        classifier.print_classifier_status()

@@ -71,6 +71,14 @@ DEFAULT_PARAMS = {
     # Tornillos tapa (M3)
     "screw_diameter": 3.0,
     "screw_head_diameter": 5.5,
+
+    # Optothermal mode parameters
+    "excitation_mode": "led",
+    "laser_power_mw": 500,
+    "beam_waist_um": 10.0,
+    "substrate_type": "gold_film",
+    "channel_width_um": 200,
+    "channel_depth_um": 100,
 }
 
 
@@ -109,6 +117,18 @@ def load_params(json_file: str = "reactor_optimized.json") -> dict:
                 params['waste_diameter'] = clf['connections'].get(
                     'waste_diameter', params['waste_diameter'])
 
+            # Optothermal mode parameters
+            if 'excitation_mode' in clf:
+                params['excitation_mode'] = clf['excitation_mode']
+            if 'laser' in clf:
+                params['laser_power_mw'] = clf['laser'].get('power_mw', 500)
+                params['beam_waist_um'] = clf['laser'].get('beam_waist_um', 10.0)
+            if 'optothermal' in clf:
+                params['substrate_type'] = clf['optothermal'].get('substrate_type', 'gold_film')
+            if 'microchannel' in clf:
+                params['channel_width_um'] = clf['microchannel'].get('width_um', 200)
+                params['channel_depth_um'] = clf['microchannel'].get('depth_um', 100)
+
             print(f"+ Parametros del clasificador cargados desde {json_file}")
         else:
             print(f"! Seccion 'classifier' no encontrada en {json_file}, usando valores por defecto")
@@ -124,6 +144,7 @@ class ClassifierModel:
 
     def __init__(self, params: dict):
         self.p = params
+        self.mode = params.get('excitation_mode', 'led')
         self._calculate_dimensions()
 
     def _calculate_dimensions(self):
@@ -298,6 +319,33 @@ class ClassifierModel:
         )
         return window
 
+    def create_fiber_port(self, zone_idx):
+        """Crea puerto para fibra optica (modo optotermico, reemplaza LEDs)"""
+        p = self.p
+        x_center = self._zone_x_center(zone_idx)
+        # Single fiber port instead of LED array
+        port = (
+            cq.Workplane("XY")
+            .cylinder(p['wall_thickness'] + self.led_space + 1, 1.0)  # 1mm radius for fiber
+            .translate((x_center, self.center_y,
+                        self.total_height - (p['wall_thickness'] + self.led_space) / 2))
+        )
+        return port
+
+    def create_gold_substrate_indicator(self, zone_idx):
+        """Representa la capa de sustrato dorado en la pared inferior de la zona"""
+        p = self.p
+        x_start = self._zone_x_start(zone_idx)
+        # Thin layer at the bottom of the zone
+        substrate = (
+            cq.Workplane("XY")
+            .box(p['zone_length'] - 1.0, p['zone_width'] - 1.0, 0.1)  # 100nm -> 0.1mm for visibility
+            .translate((x_start + p['zone_length'] / 2,
+                        self.center_y,
+                        self.zone_base_z + 0.05))
+        )
+        return substrate
+
     def create_inlet_outlet(self) -> 'cq.Workplane':
         """Crea conectores de entrada (inlet) y salida (waste)"""
         p = self.p
@@ -345,15 +393,21 @@ class ClassifierModel:
 
         # Sustraer elementos por zona
         for i in range(p['n_zones']):
-            bores = self.create_led_bores(i)
-            if bores is not None:
-                body = body.cut(bores)
+            if self.mode == 'optothermal':
+                fiber = self.create_fiber_port(i)
+                if fiber is not None:
+                    body = body.cut(fiber)
+            else:
+                bores = self.create_led_bores(i)
+                if bores is not None:
+                    body = body.cut(bores)
             body = body.cut(self.create_top_collection_port(i))
             body = body.cut(self.create_bottom_collection_port(i))
             window = self.create_observation_window(i)
             if window is not None:
                 body = body.cut(window)
-            print(f"  + Zona {i+1}: LEDs + puertos + ventana")
+            mode_str = "fibra optica + Au" if self.mode == 'optothermal' else "LEDs"
+            print(f"  + Zona {i+1}: {mode_str} + puertos + ventana")
 
         # Sustraer conectores de entrada/salida
         body = body.cut(self.create_inlet_outlet())
@@ -485,6 +539,28 @@ def generate_ascii_preview(params: dict):
     print(f"    {total_l:.1f} x {total_w_mm:.1f} x {total_h:.1f} mm")
     print(f"    Zona: {p['zone_length']:.0f} x {p['zone_width']:.0f} x {p['zone_height']:.0f} mm")
 
+    mode = params.get('excitation_mode', 'led')
+    if mode == 'optothermal':
+        print("\n" + "=" * 70)
+        print("  CLASIFICADOR OPTO-TERMICO - Corte transversal (una zona)")
+        print("=" * 70)
+        print("""
+      Fibra optica (laser)           <- Laser focalizado (arriba)
+            v
+  +---------|---------------------+
+  |  [=====Puerto superior=====] |  <- Coleccion QDots (arriba)
+  |                               |
+  |    <--- termoforesis --->     |  <- QDots migran por gradiente termico
+  |                               |
+  |    ~~~~~~~~~~~~~~~~~~~~~~~~~  |  <- Gradiente de temperatura
+  |  [###Sustrato Au (50nm)####]  |  <- Pelicula de oro (calentamiento)
+  |  [=====Puerto inferior======] |  <- Coleccion debris (abajo)
+  +-------------------------------+
+     Ventana lateral (observacion)
+
+  Principio: Laser calienta Au -> grad_T -> termoforesis (Soret)
+  Pe ~ 1-10 -> separacion VIABLE para CQDs 2-5nm""")
+
 
 # ===============================================================================
 #  PROGRAMA PRINCIPAL
@@ -497,6 +573,9 @@ if __name__ == "__main__":
         description="Generador 3D del clasificador por flotabilidad optica")
     parser.add_argument("--params", type=str, default="reactor_optimized.json",
                         help="Archivo JSON con parametros")
+    parser.add_argument("--mode", type=str, default="led",
+                        choices=["led", "optothermal"],
+                        help="Excitation mode: led or optothermal")
     parser.add_argument("--export-stl", action="store_true", help="Exportar STL")
     parser.add_argument("--export-step", action="store_true", help="Exportar STEP")
     parser.add_argument("--export-all", action="store_true",
@@ -511,6 +590,10 @@ if __name__ == "__main__":
 
     # Cargar parametros
     params = load_params(args.params)
+
+    # Override mode from CLI if specified
+    if args.mode:
+        params['excitation_mode'] = args.mode
 
     # Vista previa ASCII (siempre)
     generate_ascii_preview(params)

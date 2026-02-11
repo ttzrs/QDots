@@ -75,6 +75,18 @@ cross_section = false;
 show_leds = true;
 show_barriers = true;
 
+// Modo de excitacion: "led" o "optothermal"
+excitation_mode = "optothermal";  // "led" o "optothermal"
+
+// Parametros laser (modo optotermico)
+laser_fiber_diameter = 2.0;       // mm - diametro del puerto de fibra optica
+laser_power_mw = 500;             // mW
+beam_waist_um = 10.0;             // um
+
+// Sustrato de oro (modo optotermico)
+gold_substrate_thickness = 0.1;   // mm (representacion visual, real = 50nm)
+show_substrate = true;
+
 // =====================================================================================
 //  CALCULOS DERIVADOS
 // =====================================================================================
@@ -160,6 +172,30 @@ module led_bores(zone_idx) {
 }
 
 // -------------------------------------------------------------------------------------
+//  Puerto para fibra optica (modo optotermico, reemplaza LEDs)
+// -------------------------------------------------------------------------------------
+module fiber_port(zone_idx) {
+    if (excitation_mode == "optothermal") {
+        xc = zone_x_center(zone_idx);
+        // Un solo puerto central para fibra optica
+        translate([xc, center_y, total_height - led_mount_depth])
+            cylinder(d = laser_fiber_diameter, h = led_mount_depth + 0.01);
+    }
+}
+
+// -------------------------------------------------------------------------------------
+//  Capa de sustrato dorado en la pared inferior (modo optotermico)
+// -------------------------------------------------------------------------------------
+module gold_substrate(zone_idx) {
+    if (show_substrate && excitation_mode == "optothermal") {
+        xs = zone_x_start(zone_idx);
+        color("Gold", 0.8)
+            translate([xs + 0.5, wall_thickness + 0.5, zone_base_z])
+                cube([zone_length - 1.0, zone_width - 1.0, gold_substrate_thickness]);
+    }
+}
+
+// -------------------------------------------------------------------------------------
 //  Puerto de coleccion superior (QDots excitados)
 // -------------------------------------------------------------------------------------
 module top_collection_port(zone_idx) {
@@ -240,9 +276,13 @@ module classifier_body() {
             barrier_slot(i);
         }
 
-        // Elementos por zona
+        // Elementos por zona (modo-dependiente)
         for (i = [0 : n_zones - 1]) {
-            led_bores(i);
+            if (excitation_mode == "optothermal") {
+                fiber_port(i);
+            } else {
+                led_bores(i);
+            }
             top_collection_port(i);
             bottom_collection_port(i);
             observation_window(i);
@@ -266,7 +306,7 @@ module classifier_body() {
 
 // Indicadores de LEDs
 module led_indicators() {
-    if (show_leds) {
+    if (show_leds && excitation_mode == "led") {
         led_colors = ["Green", "Purple", "Violet"];
         for (i = [0 : n_zones - 1]) {
             xc = zone_x_center(i);
@@ -284,6 +324,18 @@ module led_indicators() {
                                      h = led_mount_depth - 1.0);
                     }
                 }
+        }
+    }
+}
+
+// Indicadores de fibra optica (modo optotermico)
+module fiber_indicators() {
+    if (excitation_mode == "optothermal") {
+        for (i = [0 : n_zones - 1]) {
+            xc = zone_x_center(i);
+            color("Red", 0.8)
+                translate([xc, center_y, total_height - led_mount_depth + 0.5])
+                    cylinder(d = laser_fiber_diameter - 0.3, h = led_mount_depth - 1.0);
         }
     }
 }
@@ -390,7 +442,15 @@ module classifier_assembly() {
         led_indicators();
     }
 
+    fiber_indicators();
+
     barrier_indicators();
+
+    // Sustrato de oro (modo optotermico)
+    for (i = [0 : n_zones - 1]) {
+        gold_substrate(i);
+    }
+
     window_indicators();
 
     // Conectores exteriores
@@ -430,4 +490,11 @@ echo(str("  Barrera: malla ~50 um (sin caida de presion)"));
 echo(str("  Puerto superior: diam ", top_port_diameter, " mm (coleccion QDots)"));
 echo(str("  Puerto inferior: diam ", bottom_port_diameter, " mm (coleccion debris)"));
 echo(str("  Ventana observacion: diam ", window_diameter, " mm"));
+echo("-------------------------------------------------------------------------------------");
+echo(str("  Modo de excitacion: ", excitation_mode));
+if (excitation_mode == "optothermal") {
+    echo(str("  Laser: ", laser_power_mw, " mW, fibra ", laser_fiber_diameter, " mm"));
+    echo(str("  Sustrato: Au ", gold_substrate_thickness * 1000, " nm"));
+    echo("  Principio: Laser -> Au -> grad_T -> termoforesis (Soret) -> Pe ~ 1-10");
+}
 echo("=====================================================================================");

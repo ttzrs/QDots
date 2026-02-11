@@ -44,6 +44,7 @@
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
+from enum import Enum
 import json
 
 
@@ -59,6 +60,11 @@ GRAVITY = 9.81                 # Aceleracion gravitatoria (m/s^2)
 VISCOSITY_WATER = 0.001        # Viscosidad del agua a 25C (Pa.s)
 DENSITY_WATER = 998            # Densidad del agua a 25C (kg/m^3)
 THERMAL_CONDUCTIVITY_WATER = 0.6  # Conductividad termica del agua (W/m/K)
+REFRACTIVE_INDEX_WATER = 1.33     # Indice de refraccion del agua
+
+# Propiedades del sustrato de oro (modo opto-termico)
+THERMAL_CONDUCTIVITY_GOLD = 317.0   # Conductividad termica del oro (W/m/K)
+REFRACTIVE_INDEX_CQD = 1.7          # Indice de refraccion estimado de CQDs
 
 # Propiedades de CQDs
 DENSITY_CQD = 1800             # Densidad tipica de carbon quantum dots (kg/m^3)
@@ -70,6 +76,17 @@ QUANTUM_YIELD_THERMAL = 0.60      # Fraccion de energia convertida en calor (1 -
 E_BULK_EV = 1.50               # Gap del grafeno dopado N (eV)
 A_CONFINEMENT = 7.26           # Constante de confinamiento (eV*nm^2)
 EV_TO_NM = 1240                # Conversion energia-longitud de onda
+
+
+# ===============================================================================
+#  MODOS DE EXCITACION
+# ===============================================================================
+
+class ExcitationMode(Enum):
+    """Modo de excitacion del clasificador"""
+    LED = "led"                    # Array de LEDs difusos (original)
+    LASER_DIRECT = "laser_direct"  # Laser focalizado sin sustrato
+    OPTOTHERMAL = "optothermal"    # Laser + sustrato absorbente (oro)
 
 
 # ===============================================================================
@@ -102,6 +119,9 @@ class ZoneSpec:
 @dataclass
 class ClassifierParameters:
     """Parametros completos del clasificador por flotabilidad optica"""
+    # Modo de excitacion
+    excitation_mode: ExcitationMode = ExcitationMode.OPTOTHERMAL
+
     # Topologia
     n_zones: int = 3                   # 3 zonas: verde, UV-azul, UV
     zone_length_mm: float = 40.0       # Longitud por zona (eje X)
@@ -114,10 +134,25 @@ class ClassifierParameters:
     barrier_pore_um: float = 50.0      # Poro grande (sin caida de presion)
     barrier_diameter_mm: float = 13.0  # Diametro de la barrera
 
-    # LEDs por zona
+    # LEDs por zona (modo LED)
     led_wavelengths_nm: list = field(default_factory=lambda: [520.0, 405.0, 365.0])
     led_power_mw: float = 200.0        # Potencia por LED (mW)
     led_array_count: int = 4           # LEDs por zona (arriba)
+
+    # Parametros laser (modos LASER_DIRECT y OPTOTHERMAL)
+    laser_power_mw: float = 500.0      # Potencia laser (mW)
+    laser_wavelengths_nm: list = field(default_factory=lambda: [520.0, 405.0, 365.0])
+    beam_waist_um: float = 10.0        # Radio del beam focalizado (um)
+
+    # Parametros opto-termicos (modo OPTOTHERMAL)
+    substrate_type: str = "gold_film"          # Tipo de sustrato absorbente
+    substrate_thickness_nm: float = 50.0       # Espesor pelicula de oro
+    substrate_absorptance: float = 0.40        # Fraccion absorbida por sustrato
+    soret_coefficient: float = 0.05            # S_T tipico (K^-1) para CQDs
+
+    # Geometria adaptada para microcanales (modos laser)
+    channel_width_um: float = 200.0    # Ancho del microcanal (um)
+    channel_depth_um: float = 100.0    # Profundidad del microcanal
 
     # Coleccion
     top_port_diameter_mm: float = 2.0  # Puerto superior (QDots)
@@ -466,6 +501,524 @@ class ClassifierDesigner:
             'x_rms_1s_mm': x_rms_1s_m * 1e3,
         }
 
+    # ===========================================================================
+    #  METODOS PARA MODO LASER Y OPTO-TERMICO
+    # ===========================================================================
+
+    def calculate_laser_irradiance(self, laser_power_mw: float = None,
+                                   beam_waist_um: float = None) -> Dict:
+        """
+        Calcula irradiancia pico de un beam gaussiano focalizado.
+
+        I_peak = 2 * P / (pi * w0^2)
+        """
+        p = self.params
+        P_W = (laser_power_mw or p.laser_power_mw) * 1e-3
+        w0_m = (beam_waist_um or p.beam_waist_um) * 1e-6
+
+        I_peak = 2.0 * P_W / (np.pi * w0_m ** 2)
+
+        return {
+            'P_laser_W': P_W,
+            'beam_waist_m': w0_m,
+            'beam_waist_um': w0_m * 1e6,
+            'I_peak_W_m2': I_peak,
+            'I_peak_kW_cm2': I_peak * 1e-7,  # conversion a kW/cm2
+            'beam_area_um2': np.pi * (w0_m * 1e6) ** 2,
+        }
+
+    def calculate_gradient_force(self, particle_diameter_nm: float,
+                                 laser_power_mw: float = None,
+                                 beam_waist_um: float = None) -> Dict:
+        """
+        Calcula fuerza de gradiente optico (regimen Rayleigh, d << lambda).
+
+        F_grad = (2*pi*n_m*r^3/c) * ((m^2-1)/(m^2+2)) * grad(I)
+        grad(I) ~ I_peak / w0  para beam gaussiano
+
+        Tambien calcula F_rad = I * sigma_abs / c  (presion de radiacion).
+        """
+        p = self.params
+        P_W = (laser_power_mw or p.laser_power_mw) * 1e-3
+        w0_m = (beam_waist_um or p.beam_waist_um) * 1e-6
+        r_m = particle_diameter_nm * 1e-9 / 2.0
+
+        # Irradiancia pico
+        I_peak = 2.0 * P_W / (np.pi * w0_m ** 2)
+
+        # Gradiente de irradiancia (gaussiano)
+        grad_I = I_peak / w0_m
+
+        # Indice de refraccion relativo
+        n_m = REFRACTIVE_INDEX_WATER
+        n_p = REFRACTIVE_INDEX_CQD
+        m = n_p / n_m
+        clausius_mossotti = (m ** 2 - 1) / (m ** 2 + 2)
+
+        # Fuerza de gradiente (Rayleigh)
+        F_grad = (2.0 * np.pi * n_m * r_m ** 3 / SPEED_OF_LIGHT) * clausius_mossotti * grad_I
+
+        # Seccion eficaz de absorcion (escala con d^3)
+        d_ref_nm = 3.0
+        sigma_abs = ABSORPTION_CROSS_SECTION * (particle_diameter_nm / d_ref_nm) ** 3
+
+        # Fuerza de radiacion (scattering + absorcion)
+        F_rad = I_peak * sigma_abs / SPEED_OF_LIGHT
+
+        # Velocidades resultantes
+        stokes_drag = 6.0 * np.pi * VISCOSITY_WATER * r_m
+        v_grad = abs(F_grad) / stokes_drag if stokes_drag > 0 else 0
+        v_rad = F_rad / stokes_drag if stokes_drag > 0 else 0
+
+        return {
+            'I_peak_W_m2': I_peak,
+            'grad_I_W_m3': grad_I,
+            'clausius_mossotti': clausius_mossotti,
+            'F_gradient_N': F_grad,
+            'F_gradient_fN': F_grad * 1e15,
+            'F_radiation_N': F_rad,
+            'F_radiation_fN': F_rad * 1e15,
+            'sigma_abs_m2': sigma_abs,
+            'v_gradient_m_s': v_grad,
+            'v_gradient_um_s': v_grad * 1e6,
+            'v_radiation_m_s': v_rad,
+            'v_radiation_um_s': v_rad * 1e6,
+            'v_total_optical_m_s': v_grad + v_rad,
+            'v_total_optical_um_s': (v_grad + v_rad) * 1e6,
+        }
+
+    def calculate_optothermal_gradient(self, laser_power_mw: float = None,
+                                       beam_waist_um: float = None) -> Dict:
+        """
+        Calcula gradiente termico generado por calentamiento del sustrato dorado.
+
+        P_heat = P_laser * absorptance
+        dT = P_heat / (4*pi*kappa_substrate*w0)   (modelo fuente puntual)
+        grad_T = dT / w0
+        """
+        p = self.params
+        P_W = (laser_power_mw or p.laser_power_mw) * 1e-3
+        w0_m = (beam_waist_um or p.beam_waist_um) * 1e-6
+
+        # Potencia absorbida por el sustrato
+        P_heat = P_W * p.substrate_absorptance
+
+        # Modelo de calentamiento puntual en sustrato dorado
+        # dT ~ P_heat / (4*pi*kappa*w0)
+        # Usamos conductividad efectiva (promedio agua-oro ponderado)
+        kappa_eff = np.sqrt(THERMAL_CONDUCTIVITY_GOLD * THERMAL_CONDUCTIVITY_WATER)
+        dT_K = P_heat / (4.0 * np.pi * kappa_eff * w0_m)
+
+        # Gradiente termico
+        grad_T = dT_K / w0_m
+
+        return {
+            'P_heat_W': P_heat,
+            'P_heat_mW': P_heat * 1e3,
+            'kappa_effective_W_mK': kappa_eff,
+            'dT_K': dT_K,
+            'grad_T_K_m': grad_T,
+            'grad_T_K_um': grad_T * 1e-6,
+            'beam_waist_um': w0_m * 1e6,
+        }
+
+    def calculate_thermophoretic_velocity(self, particle_diameter_nm: float,
+                                          grad_T_K_m: float = None,
+                                          laser_power_mw: float = None,
+                                          beam_waist_um: float = None) -> Dict:
+        """
+        Calcula velocidad termoforetica por efecto Soret.
+
+        D_T = S_T * D_brownian       (movilidad termoforetica)
+        v_T = -D_T * grad_T          (velocidad termoforetica)
+        """
+        p = self.params
+        T_K = p.temperature_c + 273.15
+        d_m = particle_diameter_nm * 1e-9
+        w0_m = (beam_waist_um or p.beam_waist_um) * 1e-6
+
+        # Difusion browniana
+        D_brownian = BOLTZMANN * T_K / (3.0 * np.pi * VISCOSITY_WATER * d_m)
+
+        # Gradiente termico (calcular si no se proporciona)
+        if grad_T_K_m is None:
+            ot = self.calculate_optothermal_gradient(laser_power_mw, beam_waist_um)
+            grad_T_K_m = ot['grad_T_K_m']
+
+        # Coeficiente de Soret y movilidad termoforetica
+        S_T = p.soret_coefficient
+        D_T = S_T * D_brownian
+
+        # Velocidad termoforetica (hacia frio = alejandose del spot)
+        v_T = D_T * grad_T_K_m  # magnitud
+
+        # Peclet termoforetico
+        Pe_T = v_T * w0_m / D_brownian
+
+        return {
+            'D_brownian_m2_s': D_brownian,
+            'S_T_K_inv': S_T,
+            'D_T_m2_sK': D_T,
+            'grad_T_K_m': grad_T_K_m,
+            'v_thermophoretic_m_s': v_T,
+            'v_thermophoretic_um_s': v_T * 1e6,
+            'Pe_thermophoretic': Pe_T,
+        }
+
+    def calculate_differential_absorption(self, particle_diameter_nm: float,
+                                          excitation_wavelength_nm: float,
+                                          laser_power_mw: float = None,
+                                          beam_waist_um: float = None) -> Dict:
+        """
+        Calcula selectividad por absorcion diferencial en modo opto-termico.
+
+        QDot absorbente: calentamiento adicional -> dS_T mayor
+        QDot no-absorbente: solo termoforesis de fondo del sustrato
+        Factor de selectividad = (v_absorbing - v_background) / v_background
+        """
+        p = self.params
+        P_W = (laser_power_mw or p.laser_power_mw) * 1e-3
+        w0_m = (beam_waist_um or p.beam_waist_um) * 1e-6
+        r_m = particle_diameter_nm * 1e-9 / 2.0
+
+        # Irradiancia del laser
+        I_peak = 2.0 * P_W / (np.pi * w0_m ** 2)
+
+        # Absorcion de este QDot a esta lambda
+        sel = self.calculate_selectivity(excitation_wavelength_nm, particle_diameter_nm)
+        absorption_relative = sel['absorption_relative']
+
+        # Seccion eficaz de absorcion (escala con d^3)
+        d_ref_nm = 3.0
+        sigma_abs = ABSORPTION_CROSS_SECTION * (particle_diameter_nm / d_ref_nm) ** 3
+
+        # Calentamiento local adicional del QDot absorbente
+        P_abs_particle = I_peak * sigma_abs * QUANTUM_YIELD_THERMAL * absorption_relative
+        dT_particle = P_abs_particle / (4.0 * np.pi * THERMAL_CONDUCTIVITY_WATER * r_m)
+
+        # Incremento del coeficiente de Soret por calentamiento local
+        # El Soret efectivo aumenta con la temperatura local
+        S_T_base = p.soret_coefficient
+        S_T_enhanced = S_T_base * (1.0 + dT_particle / (p.temperature_c + 273.15))
+
+        # Velocidad de fondo (sustrato solo, para todas las particulas)
+        ot = self.calculate_optothermal_gradient(laser_power_mw, beam_waist_um)
+        thermo = self.calculate_thermophoretic_velocity(
+            particle_diameter_nm, ot['grad_T_K_m'], laser_power_mw, beam_waist_um)
+        v_background = thermo['v_thermophoretic_m_s']
+
+        # Velocidad del QDot absorbente (fondo + contribucion propia)
+        D_brownian = thermo['D_brownian_m2_s']
+        D_T_enhanced = S_T_enhanced * D_brownian
+        v_absorbing = D_T_enhanced * ot['grad_T_K_m']
+
+        # Factor de selectividad
+        selectivity_factor = ((v_absorbing - v_background) / v_background
+                              if v_background > 0 else 0)
+
+        return {
+            'absorption_relative': absorption_relative,
+            'absorbs': sel['absorbs'],
+            'sigma_abs_m2': sigma_abs,
+            'P_absorbed_particle_W': P_abs_particle,
+            'dT_particle_K': dT_particle,
+            'S_T_base': S_T_base,
+            'S_T_enhanced': S_T_enhanced,
+            'v_background_m_s': v_background,
+            'v_background_um_s': v_background * 1e6,
+            'v_absorbing_m_s': v_absorbing,
+            'v_absorbing_um_s': v_absorbing * 1e6,
+            'selectivity_factor': selectivity_factor,
+        }
+
+    def calculate_trapping_potential(self, particle_diameter_nm: float,
+                                     dT_K: float = None,
+                                     laser_power_mw: float = None,
+                                     beam_waist_um: float = None) -> Dict:
+        """
+        Calcula potencial de atrapamiento en unidades de kT.
+
+        U_trap = S_T * k_B * T * dT    (en Joules)
+        U_kT = U_trap / (k_B * T)      (en unidades kT; >1 para atrapamiento estable)
+        """
+        p = self.params
+        T_K = p.temperature_c + 273.15
+        S_T = p.soret_coefficient
+
+        if dT_K is None:
+            ot = self.calculate_optothermal_gradient(laser_power_mw, beam_waist_um)
+            dT_K = ot['dT_K']
+
+        # Potencial de atrapamiento
+        U_trap_J = S_T * BOLTZMANN * T_K * dT_K
+        U_kT = S_T * dT_K  # = U_trap / (k_B * T)
+
+        # Estabilidad
+        if U_kT > 10:
+            stability = "fuerte"
+        elif U_kT > 1:
+            stability = "estable"
+        elif U_kT > 0.1:
+            stability = "debil"
+        else:
+            stability = "inestable"
+
+        return {
+            'S_T': S_T,
+            'dT_K': dT_K,
+            'U_trap_J': U_trap_J,
+            'U_kT': U_kT,
+            'stability': stability,
+        }
+
+    # ===========================================================================
+    #  METODOS DE DISENO POR MODO
+    # ===========================================================================
+
+    def _design_led_mode(self, geometry: Dict) -> List[Dict]:
+        """Diseno con LEDs difusos (modo original)"""
+        p = self.params
+        zones_results = []
+
+        for i, zc in enumerate(self.zones_config[:p.n_zones]):
+            led_wl = zc['led_wavelength_nm']
+            size_min, size_max = zc['target_size_range_nm']
+            representative_size = (size_min + size_max) / 2.0
+
+            rad = self.calculate_radiation_force(
+                p.led_power_mw, representative_size, p.led_array_count)
+            photo = self.calculate_photothermal_velocity(
+                p.led_power_mw, representative_size, p.led_array_count)
+            sed = self.calculate_sedimentation(representative_size)
+            brownian = self.calculate_brownian_diffusion(representative_size)
+
+            r_m = representative_size * 1e-9 / 2.0
+            stokes_drag = 6.0 * np.pi * VISCOSITY_WATER * r_m
+            v_radiation_m_s = rad['F_radiation_N'] / stokes_drag if stokes_drag > 0 else 0
+            v_up_total = photo['v_up_total_m_s'] + v_radiation_m_s
+
+            sep_time = self.calculate_separation_time(
+                v_up_total, sed['v_sedimentation_m_s'])
+            eff = self.calculate_zone_efficiency(
+                v_up_total, sed['v_sedimentation_m_s'],
+                brownian['D_m2_s'], geometry['zone_residence_time_s'])
+            sel_target = self.calculate_selectivity(led_wl, representative_size)
+            other_size = 2.0 if representative_size > 3.0 else 4.5
+            sel_other = self.calculate_selectivity(led_wl, other_size)
+
+            zone_result = {
+                'zone_number': i + 1,
+                'mode': 'LED',
+                'led_wavelength_nm': led_wl,
+                'target_size_range_nm': zc['target_size_range_nm'],
+                'target_emission_range_nm': zc['target_emission_range_nm'],
+                'representative_size_nm': representative_size,
+                'expected_content': zc['expected_content'],
+                'radiation': rad,
+                'photothermal': photo,
+                'sedimentation': sed,
+                'brownian': brownian,
+                'v_radiation_m_s': v_radiation_m_s,
+                'v_radiation_um_s': v_radiation_m_s * 1e6,
+                'v_up_total_m_s': v_up_total,
+                'v_up_total_um_s': v_up_total * 1e6,
+                'separation_time': sep_time,
+                'efficiency': eff,
+                'selectivity_target': sel_target,
+                'selectivity_other': sel_other,
+            }
+            zones_results.append(zone_result)
+        return zones_results
+
+    def _design_laser_direct_mode(self, geometry: Dict) -> List[Dict]:
+        """Diseno con laser focalizado directo (sin sustrato)"""
+        p = self.params
+        zones_results = []
+
+        for i, zc in enumerate(self.zones_config[:p.n_zones]):
+            led_wl = zc['led_wavelength_nm']
+            size_min, size_max = zc['target_size_range_nm']
+            representative_size = (size_min + size_max) / 2.0
+
+            # Fuerzas opticas del laser focalizado
+            laser_forces = self.calculate_gradient_force(
+                representative_size, p.laser_power_mw, p.beam_waist_um)
+
+            # Irradiancia del laser
+            laser_irr = self.calculate_laser_irradiance(
+                p.laser_power_mw, p.beam_waist_um)
+
+            sed = self.calculate_sedimentation(representative_size)
+            brownian = self.calculate_brownian_diffusion(representative_size)
+
+            v_up_total = laser_forces['v_total_optical_m_s']
+
+            # Usar beam_waist como escala de separacion (no zone_height)
+            w0_m = p.beam_waist_um * 1e-6
+            Pe_up = v_up_total * w0_m / brownian['D_m2_s'] if brownian['D_m2_s'] > 0 else 0
+
+            sep_time = self.calculate_separation_time(
+                v_up_total, sed['v_sedimentation_m_s'])
+            eff = self.calculate_zone_efficiency(
+                v_up_total, sed['v_sedimentation_m_s'],
+                brownian['D_m2_s'], geometry['zone_residence_time_s'])
+
+            # Override Pe with laser-scale Pe
+            eff['Pe_up'] = Pe_up
+
+            sel_target = self.calculate_selectivity(led_wl, representative_size)
+            other_size = 2.0 if representative_size > 3.0 else 4.5
+            sel_other = self.calculate_selectivity(led_wl, other_size)
+
+            # Construir resultado compatible con LED pero con datos laser
+            zone_result = {
+                'zone_number': i + 1,
+                'mode': 'LASER_DIRECT',
+                'led_wavelength_nm': led_wl,
+                'target_size_range_nm': zc['target_size_range_nm'],
+                'target_emission_range_nm': zc['target_emission_range_nm'],
+                'representative_size_nm': representative_size,
+                'expected_content': zc['expected_content'],
+                'radiation': {
+                    'P_total_W': laser_irr['P_laser_W'],
+                    'irradiance_W_m2': laser_irr['I_peak_W_m2'],
+                    'sigma_abs_m2': laser_forces['sigma_abs_m2'],
+                    'F_radiation_N': laser_forces['F_radiation_N'],
+                    'F_radiation_fN': laser_forces['F_radiation_fN'],
+                    'P_radiation_Pa': laser_irr['I_peak_W_m2'] / SPEED_OF_LIGHT,
+                },
+                'photothermal': {
+                    'P_absorbed_W': 0, 'P_absorbed_fW': 0,
+                    'dT_local_K': 0, 'dT_local_mK': 0,
+                    'v_thermal_m_s': 0, 'v_thermal_um_s': 0,
+                    'v_photophoretic_m_s': 0, 'v_photophoretic_um_s': 0,
+                    'v_up_total_m_s': 0, 'v_up_total_um_s': 0,
+                },
+                'laser': laser_forces,
+                'laser_irradiance': laser_irr,
+                'sedimentation': sed,
+                'brownian': brownian,
+                'v_radiation_m_s': laser_forces['v_radiation_m_s'],
+                'v_radiation_um_s': laser_forces['v_radiation_um_s'],
+                'v_gradient_m_s': laser_forces['v_gradient_m_s'],
+                'v_gradient_um_s': laser_forces['v_gradient_um_s'],
+                'v_up_total_m_s': v_up_total,
+                'v_up_total_um_s': v_up_total * 1e6,
+                'separation_time': sep_time,
+                'efficiency': eff,
+                'selectivity_target': sel_target,
+                'selectivity_other': sel_other,
+            }
+            zones_results.append(zone_result)
+        return zones_results
+
+    def _design_optothermal_mode(self, geometry: Dict) -> List[Dict]:
+        """Diseno opto-termico: laser + sustrato dorado + termoforesis"""
+        p = self.params
+        zones_results = []
+
+        for i, zc in enumerate(self.zones_config[:p.n_zones]):
+            led_wl = zc['led_wavelength_nm']
+            size_min, size_max = zc['target_size_range_nm']
+            representative_size = (size_min + size_max) / 2.0
+
+            # Irradiancia del laser
+            laser_irr = self.calculate_laser_irradiance(
+                p.laser_power_mw, p.beam_waist_um)
+
+            # Gradiente termico del sustrato
+            ot_grad = self.calculate_optothermal_gradient(
+                p.laser_power_mw, p.beam_waist_um)
+
+            # Velocidad termoforetica
+            thermo = self.calculate_thermophoretic_velocity(
+                representative_size, ot_grad['grad_T_K_m'],
+                p.laser_power_mw, p.beam_waist_um)
+
+            # Absorcion diferencial (selectividad)
+            diff_abs = self.calculate_differential_absorption(
+                representative_size, led_wl,
+                p.laser_power_mw, p.beam_waist_um)
+
+            # Potencial de atrapamiento
+            trap = self.calculate_trapping_potential(
+                representative_size, ot_grad['dT_K'],
+                p.laser_power_mw, p.beam_waist_um)
+
+            # Fuerzas opticas directas (contribucion menor)
+            laser_forces = self.calculate_gradient_force(
+                representative_size, p.laser_power_mw, p.beam_waist_um)
+
+            sed = self.calculate_sedimentation(representative_size)
+            brownian = self.calculate_brownian_diffusion(representative_size)
+
+            # Velocidad total: termoforesis (dominante) + optica (menor)
+            v_thermo = thermo['v_thermophoretic_m_s']
+            v_optical = laser_forces['v_total_optical_m_s']
+            v_up_total = v_thermo + v_optical
+
+            # Peclet a escala del beam waist
+            w0_m = p.beam_waist_um * 1e-6
+            Pe_up = v_up_total * w0_m / brownian['D_m2_s'] if brownian['D_m2_s'] > 0 else 0
+
+            sep_time = self.calculate_separation_time(
+                v_up_total, sed['v_sedimentation_m_s'])
+            eff = self.calculate_zone_efficiency(
+                v_up_total, sed['v_sedimentation_m_s'],
+                brownian['D_m2_s'], geometry['zone_residence_time_s'])
+            eff['Pe_up'] = Pe_up  # Override con Pe a escala laser
+
+            sel_target = self.calculate_selectivity(led_wl, representative_size)
+            other_size = 2.0 if representative_size > 3.0 else 4.5
+            sel_other = self.calculate_selectivity(led_wl, other_size)
+
+            zone_result = {
+                'zone_number': i + 1,
+                'mode': 'OPTOTHERMAL',
+                'led_wavelength_nm': led_wl,
+                'target_size_range_nm': zc['target_size_range_nm'],
+                'target_emission_range_nm': zc['target_emission_range_nm'],
+                'representative_size_nm': representative_size,
+                'expected_content': zc['expected_content'],
+                'radiation': {
+                    'P_total_W': laser_irr['P_laser_W'],
+                    'irradiance_W_m2': laser_irr['I_peak_W_m2'],
+                    'sigma_abs_m2': laser_forces['sigma_abs_m2'],
+                    'F_radiation_N': laser_forces['F_radiation_N'],
+                    'F_radiation_fN': laser_forces['F_radiation_fN'],
+                    'P_radiation_Pa': laser_irr['I_peak_W_m2'] / SPEED_OF_LIGHT,
+                },
+                'photothermal': {
+                    'P_absorbed_W': 0, 'P_absorbed_fW': 0,
+                    'dT_local_K': ot_grad['dT_K'], 'dT_local_mK': ot_grad['dT_K'] * 1e3,
+                    'v_thermal_m_s': v_thermo, 'v_thermal_um_s': v_thermo * 1e6,
+                    'v_photophoretic_m_s': 0, 'v_photophoretic_um_s': 0,
+                    'v_up_total_m_s': v_thermo, 'v_up_total_um_s': v_thermo * 1e6,
+                },
+                'optothermal': ot_grad,
+                'thermophoresis': thermo,
+                'differential_absorption': diff_abs,
+                'trapping': trap,
+                'laser': laser_forces,
+                'laser_irradiance': laser_irr,
+                'sedimentation': sed,
+                'brownian': brownian,
+                'v_thermophoretic_m_s': v_thermo,
+                'v_thermophoretic_um_s': v_thermo * 1e6,
+                'v_optical_m_s': v_optical,
+                'v_optical_um_s': v_optical * 1e6,
+                'v_radiation_m_s': laser_forces['v_radiation_m_s'],
+                'v_radiation_um_s': laser_forces['v_radiation_um_s'],
+                'v_up_total_m_s': v_up_total,
+                'v_up_total_um_s': v_up_total * 1e6,
+                'separation_time': sep_time,
+                'efficiency': eff,
+                'selectivity_target': sel_target,
+                'selectivity_other': sel_other,
+            }
+            zones_results.append(zone_result)
+        return zones_results
+
     def calculate_separation_time(self, v_up_m_s: float, v_sed_m_s: float,
                                   zone_height_mm: float = None) -> Dict:
         """
@@ -696,70 +1249,13 @@ class ClassifierDesigner:
         # 1. Geometria
         geometry = self.calculate_zone_geometry()
 
-        # 2. Fisica por zona
-        zones_results = []
-        for i, zc in enumerate(self.zones_config[:p.n_zones]):
-            led_wl = zc['led_wavelength_nm']
-            size_min, size_max = zc['target_size_range_nm']
-            representative_size = (size_min + size_max) / 2.0
-
-            # Fuerza de radiacion
-            rad = self.calculate_radiation_force(
-                p.led_power_mw, representative_size, p.led_array_count)
-
-            # Velocidad fototermica
-            photo = self.calculate_photothermal_velocity(
-                p.led_power_mw, representative_size, p.led_array_count)
-
-            # Sedimentacion
-            sed = self.calculate_sedimentation(representative_size)
-
-            # Difusion browniana
-            brownian = self.calculate_brownian_diffusion(representative_size)
-
-            # Velocidad total ascendente = fototermica + radiacion/(6*pi*mu*r)
-            r_m = representative_size * 1e-9 / 2.0
-            stokes_drag = 6.0 * np.pi * VISCOSITY_WATER * r_m
-            v_radiation_m_s = rad['F_radiation_N'] / stokes_drag if stokes_drag > 0 else 0
-            v_up_total = photo['v_up_total_m_s'] + v_radiation_m_s
-
-            # Tiempo de separacion
-            sep_time = self.calculate_separation_time(
-                v_up_total, sed['v_sedimentation_m_s'])
-
-            # Eficiencia de zona
-            eff = self.calculate_zone_efficiency(
-                v_up_total, sed['v_sedimentation_m_s'],
-                brownian['D_m2_s'], geometry['zone_residence_time_s'])
-
-            # Selectividad para el tamano objetivo
-            sel_target = self.calculate_selectivity(led_wl, representative_size)
-
-            # Selectividad para un QDot de otro tamano (cross-check)
-            other_size = 2.0 if representative_size > 3.0 else 4.5
-            sel_other = self.calculate_selectivity(led_wl, other_size)
-
-            zone_result = {
-                'zone_number': i + 1,
-                'led_wavelength_nm': led_wl,
-                'target_size_range_nm': zc['target_size_range_nm'],
-                'target_emission_range_nm': zc['target_emission_range_nm'],
-                'representative_size_nm': representative_size,
-                'expected_content': zc['expected_content'],
-                'radiation': rad,
-                'photothermal': photo,
-                'sedimentation': sed,
-                'brownian': brownian,
-                'v_radiation_m_s': v_radiation_m_s,
-                'v_radiation_um_s': v_radiation_m_s * 1e6,
-                'v_up_total_m_s': v_up_total,
-                'v_up_total_um_s': v_up_total * 1e6,
-                'separation_time': sep_time,
-                'efficiency': eff,
-                'selectivity_target': sel_target,
-                'selectivity_other': sel_other,
-            }
-            zones_results.append(zone_result)
+        # 2. Fisica por zona (ramificado por modo de excitacion)
+        if p.excitation_mode == ExcitationMode.LED:
+            zones_results = self._design_led_mode(geometry)
+        elif p.excitation_mode == ExcitationMode.LASER_DIRECT:
+            zones_results = self._design_laser_direct_mode(geometry)
+        else:  # OPTOTHERMAL
+            zones_results = self._design_optothermal_mode(geometry)
 
         # 3. Puntuaciones
         scores = self.calculate_scores(zones_results, geometry)
@@ -869,9 +1365,16 @@ class ClassifierDesigner:
         p = self.params
         o = self.output
 
+        mode_labels = {
+            ExcitationMode.LED: "LED difuso",
+            ExcitationMode.LASER_DIRECT: "Laser focalizado directo",
+            ExcitationMode.OPTOTHERMAL: "Opto-termico (laser + sustrato Au)",
+        }
+        mode_label = mode_labels.get(p.excitation_mode, str(p.excitation_mode))
+
         print("\n" + "=" * 80)
         print("  REPORTE DE DISENO DEL CLASIFICADOR POR FLOTABILIDAD OPTICA")
-        print("  Separacion selectiva de CQDs por excitacion con LED")
+        print(f"  Modo: {mode_label}")
         print("=" * 80)
 
         # --- 1. GEOMETRIA DEL SEPARADOR ---
@@ -919,9 +1422,10 @@ class ClassifierDesigner:
         print("|  3. FISICA DE SEPARACION" + " " * 53 + "|")
         print("+" + "-" * 78 + "+")
         for z in self._zones_results:
-            print(f"|  --- Zona {z['zone_number']}: LED {z['led_wavelength_nm']:.0f} nm, "
-                  f"QDot representativo {z['representative_size_nm']:.1f} nm ---" +
-                  " " * (78 - 60 - len(f"{z['representative_size_nm']:.1f}")) + "|")
+            mode_str = z.get('mode', 'LED')
+            print(f"|  --- Zona {z['zone_number']}: {z['led_wavelength_nm']:.0f} nm [{mode_str}], "
+                  f"QDot {z['representative_size_nm']:.1f} nm ---" +
+                  " " * max(1, 78 - 48 - len(mode_str) - len(f"{z['representative_size_nm']:.1f}")) + "|")
 
             rad = z['radiation']
             photo = z['photothermal']
@@ -929,14 +1433,46 @@ class ClassifierDesigner:
             br = z['brownian']
 
             physics_lines = [
-                f"  Irradiancia:          {rad['irradiance_W_m2']:.1f} W/m2",
+                f"  Irradiancia:          {rad['irradiance_W_m2']:.2e} W/m2",
                 f"  sigma_abs:            {rad['sigma_abs_m2']:.2e} m2",
-                f"  F_radiacion:          {rad['F_radiation_fN']:.3f} fN",
+                f"  F_radiacion:          {rad['F_radiation_fN']:.4f} fN",
                 f"  v_radiacion:          {z['v_radiation_um_s']:.4f} um/s",
-                f"  P_absorbida (calor):  {photo['P_absorbed_fW']:.2f} fW",
-                f"  dT local:             {photo['dT_local_mK']:.3f} mK",
-                f"  v_fototermica:        {photo['v_thermal_um_s']:.4f} um/s",
-                f"  v_fotoforetica:       {photo['v_photophoretic_um_s']:.4f} um/s",
+            ]
+
+            if p.excitation_mode == ExcitationMode.LED:
+                physics_lines += [
+                    f"  P_absorbida (calor):  {photo['P_absorbed_fW']:.2f} fW",
+                    f"  dT local:             {photo['dT_local_mK']:.3f} mK",
+                    f"  v_fototermica:        {photo['v_thermal_um_s']:.4f} um/s",
+                    f"  v_fotoforetica:       {photo['v_photophoretic_um_s']:.4f} um/s",
+                ]
+            elif p.excitation_mode == ExcitationMode.LASER_DIRECT:
+                lf = z.get('laser', {})
+                physics_lines += [
+                    f"  F_gradiente:          {lf.get('F_gradient_fN', 0):.4f} fN",
+                    f"  v_gradiente:          {z.get('v_gradient_um_s', 0):.4f} um/s",
+                ]
+            else:  # OPTOTHERMAL
+                ot = z.get('optothermal', {})
+                th = z.get('thermophoresis', {})
+                da = z.get('differential_absorption', {})
+                tr = z.get('trapping', {})
+                physics_lines += [
+                    f"  --- Opto-termico ---",
+                    f"  P_calor sustrato:     {ot.get('P_heat_mW', 0):.1f} mW",
+                    f"  dT sustrato:          {ot.get('dT_K', 0):.1f} K",
+                    f"  grad_T:               {ot.get('grad_T_K_m', 0):.2e} K/m",
+                    f"  v_termoforetica:      {z.get('v_thermophoretic_um_s', 0):.2f} um/s",
+                    f"  Pe_termoforetico:     {th.get('Pe_thermophoretic', 0):.2f}",
+                    f"  --- Selectividad diferencial ---",
+                    f"  v_absorbente:         {da.get('v_absorbing_um_s', 0):.2f} um/s",
+                    f"  v_fondo:              {da.get('v_background_um_s', 0):.2f} um/s",
+                    f"  factor_selectividad:  {da.get('selectivity_factor', 0):.3f}",
+                    f"  --- Atrapamiento ---",
+                    f"  U_trap:               {tr.get('U_kT', 0):.2f} kT ({tr.get('stability', '?')})",
+                ]
+
+            physics_lines += [
                 f"  v_UP TOTAL:           {z['v_up_total_um_s']:.4f} um/s",
                 f"  v_sedimentacion:      {sed['v_sedimentation_um_s']:.6f} um/s",
                 f"  D_browniana:          {br['D_um2_s']:.2f} um2/s",
@@ -1097,6 +1633,114 @@ class ClassifierDesigner:
               " " * (78 - 28 - len(f"{p.led_array_count} x {p.led_power_mw:.0f} mW por zona")) + "|")
         print("+" + "-" * 78 + "+")
 
+    @staticmethod
+    def compare_modes(zones_config=None):
+        """
+        Ejecuta los 3 modos de excitacion y muestra comparacion lado a lado.
+        Muy util para demostrar por que el modo opto-termico es el unico viable.
+        """
+        zones_config = zones_config or DEFAULT_ZONES_CONFIG
+
+        # Ejecutar diseno para cada modo
+        results = {}
+        for mode in ExcitationMode:
+            params = ClassifierParameters(excitation_mode=mode)
+            designer = ClassifierDesigner(params, zones_config)
+            designer.design()
+            results[mode] = {
+                'output': designer.output,
+                'zones': designer._zones_results,
+                'scores': designer._scores,
+                'geometry': designer._geometry,
+            }
+
+        print("\n" + "=" * 80)
+        print("  COMPARACION DE MODOS DE EXCITACION")
+        print("  Mismo sistema, 3 aproximaciones fisicas diferentes")
+        print("=" * 80)
+
+        # Tabla comparativa por zona representativa (Zona 2: 3.0 nm, la mas tipica)
+        zone_idx = 1  # Zona 2
+        if len(zones_config) < 2:
+            zone_idx = 0
+
+        print(f"\n  Zona representativa: Zona {zone_idx+1} "
+              f"(QDot {zones_config[zone_idx]['target_size_range_nm']}nm)")
+        print()
+
+        header = f"  {'Parametro':<30} {'LED':<18} {'Laser directo':<18} {'Opto-termico':<18}"
+        print(header)
+        print("  " + "-" * 82)
+
+        # Extraer datos por modo
+        led_z = results[ExcitationMode.LED]['zones'][zone_idx]
+        laser_z = results[ExcitationMode.LASER_DIRECT]['zones'][zone_idx]
+        ot_z = results[ExcitationMode.OPTOTHERMAL]['zones'][zone_idx]
+
+        rows = [
+            ("Irradiancia (W/m2)",
+             f"{led_z['radiation']['irradiance_W_m2']:.0f}",
+             f"{laser_z['radiation']['irradiance_W_m2']:.2e}",
+             f"{ot_z['radiation']['irradiance_W_m2']:.2e}"),
+            ("F_radiacion (fN)",
+             f"{led_z['radiation']['F_radiation_fN']:.6f}",
+             f"{laser_z['radiation']['F_radiation_fN']:.4f}",
+             f"{ot_z['radiation']['F_radiation_fN']:.4f}"),
+            ("v_up total (um/s)",
+             f"{led_z['v_up_total_um_s']:.6f}",
+             f"{laser_z['v_up_total_um_s']:.4f}",
+             f"{ot_z['v_up_total_um_s']:.2f}"),
+            ("D_browniana (um2/s)",
+             f"{led_z['brownian']['D_um2_s']:.1f}",
+             f"{laser_z['brownian']['D_um2_s']:.1f}",
+             f"{ot_z['brownian']['D_um2_s']:.1f}"),
+            ("Pe (Peclet)",
+             f"{led_z['efficiency']['Pe_up']:.6f}",
+             f"{laser_z['efficiency']['Pe_up']:.4f}",
+             f"{ot_z['efficiency']['Pe_up']:.2f}"),
+            ("Eficiencia zona (%)",
+             f"{led_z['efficiency']['efficiency']*100:.1f}",
+             f"{laser_z['efficiency']['efficiency']*100:.1f}",
+             f"{ot_z['efficiency']['efficiency']*100:.1f}"),
+        ]
+
+        # Datos especificos opto-termicos
+        if 'optothermal' in ot_z:
+            rows += [
+                ("dT sustrato (K)",
+                 "-", "-",
+                 f"{ot_z['optothermal']['dT_K']:.1f}"),
+                ("grad_T (K/m)",
+                 "-", "-",
+                 f"{ot_z['optothermal']['grad_T_K_m']:.2e}"),
+                ("v_termoforetica (um/s)",
+                 "-", "-",
+                 f"{ot_z.get('v_thermophoretic_um_s', 0):.2f}"),
+                ("U_trap (kT)",
+                 "-", "-",
+                 f"{ot_z['trapping']['U_kT']:.2f}"),
+            ]
+
+        for label, v_led, v_laser, v_ot in rows:
+            print(f"  {label:<30} {v_led:<18} {v_laser:<18} {v_ot:<18}")
+
+        # Puntuaciones globales
+        print("\n  " + "-" * 82)
+        print(f"  {'PUNTUACION GLOBAL':<30} "
+              f"{results[ExcitationMode.LED]['scores']['overall_score']:<18.0f} "
+              f"{results[ExcitationMode.LASER_DIRECT]['scores']['overall_score']:<18.0f} "
+              f"{results[ExcitationMode.OPTOTHERMAL]['scores']['overall_score']:<18.0f}")
+
+        # Veredicto
+        print("\n  " + "=" * 82)
+        print("  VEREDICTO:")
+        print("    LED:            Pe << 1  ->  Difusion browniana domina completamente")
+        print("    Laser directo:  Pe << 1  ->  10^6x mas irradiancia pero fuerzas opticas")
+        print("                                 sobre CQDs de 2-5nm siguen siendo insuficientes")
+        print("    OPTO-TERMICO:   Pe ~ 1-10 -> Termoforesis via sustrato dorado es VIABLE")
+        print("                                 Primera aproximacion con separacion real")
+        print("  " + "=" * 82)
+
     def export_cad_parameters(self) -> Dict:
         """Exporta parametros para software CAD en formato JSON"""
         p = self.params
@@ -1175,23 +1819,40 @@ if __name__ == "__main__":
                         help="Ejecutar diseno con parametros por defecto")
     parser.add_argument("--optimize", action="store_true",
                         help="Ejecutar optimizacion por busqueda aleatoria")
+    parser.add_argument("--compare", action="store_true",
+                        help="Comparar los 3 modos de excitacion lado a lado")
+    parser.add_argument("--mode", type=str, default="optothermal",
+                        choices=["led", "laser", "optothermal"],
+                        help="Modo de excitacion: led, laser, optothermal (default)")
     parser.add_argument("--export-cad", type=str,
                         help="Exportar parametros CAD a archivo JSON")
     args = parser.parse_args()
 
+    # Mapear argumento de modo a enum
+    mode_map = {
+        "led": ExcitationMode.LED,
+        "laser": ExcitationMode.LASER_DIRECT,
+        "optothermal": ExcitationMode.OPTOTHERMAL,
+    }
+    selected_mode = mode_map[args.mode]
+
     print("=" * 80)
     print("  CLASIFICADOR POR FLOTABILIDAD OPTICA PARA CQDs")
-    print("  Separacion selectiva por excitacion LED + fuerza fotoforetica/fototermica")
+    print("  Separacion selectiva: LED / Laser directo / Opto-termico")
     print("=" * 80)
 
-    if args.optimize:
-        print(f"\n-> Optimizando configuracion del clasificador...")
+    if args.compare:
+        ClassifierDesigner.compare_modes()
+
+    elif args.optimize:
+        print(f"\n-> Optimizando configuracion del clasificador (modo: {args.mode})...")
         print("  (Esto puede tardar unos segundos...)\n")
 
-        designer = ClassifierDesigner()
+        designer = ClassifierDesigner(ClassifierParameters(excitation_mode=selected_mode))
         best_params, best_output = designer.optimize(max_iterations=500)
 
         # Crear disenador con mejores parametros
+        best_params.excitation_mode = selected_mode
         designer = ClassifierDesigner(best_params)
         designer.design()
         designer.print_design_report()
@@ -1203,9 +1864,9 @@ if __name__ == "__main__":
             print(f"\n-> Parametros CAD exportados a: {args.export_cad}")
 
     elif args.design:
-        print("\n-> Ejecutando diseno con parametros por defecto...")
+        print(f"\n-> Ejecutando diseno (modo: {args.mode})...")
 
-        params = ClassifierParameters()
+        params = ClassifierParameters(excitation_mode=selected_mode)
         designer = ClassifierDesigner(params)
         designer.design()
         designer.print_design_report()
@@ -1217,16 +1878,19 @@ if __name__ == "__main__":
             print(f"\n-> Parametros CAD exportados a: {args.export_cad}")
 
     else:
-        # Sin argumentos: mostrar diseno por defecto
-        print("\n-> Ejecutando diseno con parametros por defecto...")
+        # Sin argumentos: mostrar diseno con modo seleccionado
+        print(f"\n-> Ejecutando diseno (modo: {args.mode})...")
 
-        params = ClassifierParameters()
+        params = ClassifierParameters(excitation_mode=selected_mode)
         designer = ClassifierDesigner(params)
         designer.design()
         designer.print_design_report()
 
     print("\n" + "=" * 80)
-    print("  Uso: python classifier_design.py --design")
-    print("       python classifier_design.py --optimize")
+    print("  Uso: python classifier_design.py --design --mode optothermal")
+    print("       python classifier_design.py --design --mode led")
+    print("       python classifier_design.py --design --mode laser")
+    print("       python classifier_design.py --compare")
+    print("       python classifier_design.py --optimize --mode optothermal")
     print("       python classifier_design.py --export-cad classifier_cad.json")
     print("=" * 80)

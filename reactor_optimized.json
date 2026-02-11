@@ -38,6 +38,7 @@
   },
   "classifier": {
     "type": "optical_buoyancy",
+    "excitation_mode": "optothermal",
     "n_zones": 3,
     "zone_length": 40.0,
     "zone_height": 15.0,
@@ -47,6 +48,21 @@
     "barriers": {
       "pore_diameter_um": 50.0,
       "material": "mesh_steel"
+    },
+    "laser": {
+      "power_mw": 500,
+      "wavelengths_nm": [520, 405, 365],
+      "beam_waist_um": 10.0
+    },
+    "optothermal": {
+      "substrate_type": "gold_film",
+      "substrate_thickness_nm": 50.0,
+      "substrate_absorptance": 0.40,
+      "soret_coefficient": 0.05
+    },
+    "microchannel": {
+      "width_um": 200,
+      "depth_um": 100
     },
     "zones": [
       {
@@ -90,7 +106,9 @@
     "performance": {
       "estimated_recovery": 0.0,
       "estimated_purity": 0.0,
-      "note": "Forces are sub-fN for 2-5nm particles; Brownian diffusion dominates"
+      "note_led": "LED mode: Pe << 0.001, forces sub-fN, Brownian dominates",
+      "note_laser": "Laser direct: Pe ~ 0.0001, 10^6x irradiance but still insufficient",
+      "note_optothermal": "Optothermal: Pe ~ 1-10, thermophoresis via Au substrate is viable"
     }
   }
 }
