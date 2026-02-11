@@ -1,0 +1,104 @@
+{
+  "current_config": {
+    "n_channels": 8,
+    "channel_length_mm": 300.0,
+    "flow_ml_min": 5.0,
+    "voltage_kv": 10.0,
+    "frequency_khz": 20.0,
+    "plasma_area_cm2": 48.0,
+    "residence_time_s": 17.28,
+    "energy_density_j_ml": 144.0,
+    "production_mg_h": 71.6394939834119,
+    "concentration_mg_ml": 0.23879831327803966,
+    "wavelength_nm": 528.8273411470647,
+    "size_nm": 2.9314913113870196,
+    "gap_ev": 2.3448106849209998,
+    "monodispersity": 0.85,
+    "in_spec": false,
+    "energy_factor": 0.3533133283586014,
+    "residence_factor": 0.9816740012799432,
+    "area_factor": 2.0,
+    "radical_factor": 0.85,
+    "catalyst_factor": 1.35,
+    "OH_cm3": -0.22083926691284714,
+    "H2O2_fraction": 0.0014024154152536253,
+    "cantera_available": true,
+    "power_w": 12.0,
+    "E_field_V_m": 50000000.0,
+    "max_temp_C": 61.51666666666669,
+    "cooling_ok": true,
+    "score": 0.3557340650624351
+  },
+  "optimization": {
+    "best_params": {
+      "n_channels": 22,
+      "channel_length_mm": 500,
+      "flow_ml_min": 20,
+      "voltage_kv": 13.19546982011666,
+      "frequency_khz": 30
+    },
+    "best_result": {
+      "n_channels": 22,
+      "channel_length_mm": 500,
+      "flow_ml_min": 20,
+      "voltage_kv": 13.19546982011666,
+      "frequency_khz": 30,
+      "plasma_area_cm2": 220.0,
+      "residence_time_s": 19.8,
+      "energy_density_j_ml": 430.94804883968385,
+      "production_mg_h": 822.792299574551,
+      "concentration_mg_ml": 0.6856602496454591,
+      "wavelength_nm": 468.195294035506,
+      "size_nm": 2.5142529218179184,
+      "gap_ev": 2.6484674574835934,
+      "monodispersity": 0.85,
+      "in_spec": true,
+      "energy_factor": 0.9959750458951911,
+      "residence_factor": 0.9999000049998333,
+      "area_factor": 2.0,
+      "radical_factor": 0.8500000000000001,
+      "catalyst_factor": 1.35,
+      "OH_cm3": 0.4370564533932746,
+      "H2O2_fraction": 0.001402415457969237,
+      "cantera_available": true,
+      "power_w": 143.64934961322794,
+      "E_field_V_m": 65977349.10058329,
+      "max_temp_C": 64.20301059434027,
+      "cooling_ok": true,
+      "score": 0.8265892963731749
+    },
+    "n_feasible": 189
+  },
+  "surrogate": {
+    "metrics": {
+      "production_mg_h": {
+        "mae": 19.697649002075195,
+        "rmse": 36.702938079833984,
+        "r2": 0.9425014853477478
+      },
+      "wavelength_nm": {
+        "mae": 2.065666675567627,
+        "rmse": 3.3037045001983643,
+        "r2": 0.9941587448120117
+      },
+      "power_w": {
+        "mae": 2.219722032546997,
+        "rmse": 3.6020781993865967,
+        "r2": 0.9951923489570618
+      },
+      "energy_density_j_ml": {
+        "mae": 26.808393478393555,
+        "rmse": 58.098670959472656,
+        "r2": 0.9873284101486206
+      },
+      "max_temp_C": {
+        "mae": 0.07569725066423416,
+        "rmse": 0.09880755841732025,
+        "r2": 0.9974973797798157
+      }
+    },
+    "device": "cuda",
+    "model_path": "/app/optimization_results/reactor_surrogate_dnn.pt"
+  },
+  "mechanism_type": "gri30"
+}

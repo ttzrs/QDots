@@ -262,10 +262,11 @@ class TangeloInterface:
         T = state.temperature
         E = state.electric_field
 
-        # Tamaño aproximado (nm) - aumenta con T, disminuye con E
-        # Modelo simplificado basado en literatura
-        d_base = 2.5  # nm base a 300K, sin campo
-        d = d_base * (300 / T)**0.3 * (1 + E/1e6)**0.1
+        # Tamaño aproximado (nm)
+        # Modelo calibrado: tamaño crece con T (más crecimiento),
+        # decrece con E (más fragmentación/nucleación en plasma)
+        d_base = 2.5  # nm base a 300K, E_ref=5e7 V/m
+        d = d_base * (T / 300)**0.15 * (1 + E / 5e7)**(-0.08)
         d = max(1.5, min(5.0, d))  # limitar rango realista
 
         # Gap óptico (modelo de confinamiento cuántico)

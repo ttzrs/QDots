@@ -1,0 +1,606 @@
+{
+  "confinement": {
+    "model_valid": true,
+    "current_params": {
+      "E_bulk": 1.5,
+      "A_conf": 7.26
+    },
+    "fitted_params": {
+      "E_bulk": 1.6857130089615937,
+      "A_conf": 6.110890893886139
+    },
+    "mean_error_current": 3.937381188264471,
+    "mean_error_fitted": 3.2922295900624388,
+    "r2": 0.9496627990554417,
+    "recommendation": "current_ok",
+    "gap_at_target": 2.663455551983376,
+    "lambda_at_target": 465.5606131953726
+  },
+  "tangelo": {
+    "zones": {
+      "inlet": {
+        "temperature_K": 298.15,
+        "electric_field_kV_cm": 0.0,
+        "gap_eV": 2.657296763920888,
+        "size_nm": 2.5046436266360494,
+        "wavelength_nm": 466.6396380095531,
+        "method": "tangelo_vqe",
+        "confidence": 0.8,
+        "activation_energies": {
+          "H2O_dissoc": 498.0,
+          "OH_formation": 75.0,
+          "precursor_oxid": 85.0,
+          "C_nucleation": 150.0,
+          "particle_growth": 50.0,
+          "surface_func": 40.0
+        }
+      },
+      "plasma_zone": {
+        "temperature_K": 333.15,
+        "electric_field_kV_cm": 5.0,
+        "gap_eV": 2.640642342524493,
+        "size_nm": 2.522862408718329,
+        "wavelength_nm": 469.5827147930006,
+        "method": "tangelo_vqe",
+        "confidence": 0.8,
+        "activation_energies": {
+          "H2O_dissoc": 497.999996718125,
+          "OH_formation": 74.999996718125,
+          "precursor_oxid": 84.999996718125,
+          "C_nucleation": 149.999996718125,
+          "particle_growth": 49.999996718125,
+          "surface_func": 39.999996718125
+        }
+      },
+      "plasma_high_E": {
+        "temperature_K": 333.15,
+        "electric_field_kV_cm": 10.0,
+        "gap_eV": 2.5768661904315358,
+        "size_nm": 2.5964946935960396,
+        "wavelength_nm": 481.204652614245,
+        "method": "tangelo_vqe",
+        "confidence": 0.8,
+        "activation_energies": {
+          "H2O_dissoc": 497.9999868725,
+          "OH_formation": 74.9999868725,
+          "precursor_oxid": 84.9999868725,
+          "C_nucleation": 149.9999868725,
+          "particle_growth": 49.9999868725,
+          "surface_func": 39.9999868725
+        }
+      },
+      "outlet": {
+        "temperature_K": 323.15,
+        "electric_field_kV_cm": 0.0,
+        "gap_eV": 2.7145806185864956,
+        "size_nm": 2.444866427996736,
+        "wavelength_nm": 456.7924752390217,
+        "method": "tangelo_vqe",
+        "confidence": 0.8,
+        "activation_energies": {
+          "H2O_dissoc": 498.0,
+          "OH_formation": 75.0,
+          "precursor_oxid": 85.0,
+          "C_nucleation": 150.0,
+          "particle_growth": 50.0,
+          "surface_func": 40.0
+        }
+      }
+    },
+    "kinetics_valid": true,
+    "gap_consistency_pct": 0.7874082309703578,
+    "plasma_zone_gap_eV": 2.640642342524493,
+    "plasma_zone_size_nm": 2.522862408718329,
+    "plasma_zone_lambda_nm": 469.5827147930006
+  },
+  "production": {
+    "all_valid": false,
+    "validations": {
+      "Producci\u00f3n (mg/h)": {
+        "expected": 505.0,
+        "calculated": 167.76246052932512,
+        "delta_pct": 66.77971078627225,
+        "ok": false
+      },
+      "\u03bb emisi\u00f3n (nm)": {
+        "expected": 460.0,
+        "calculated": 505.77638648329895,
+        "delta_pct": 9.951388365934555,
+        "ok": false
+      },
+      "Tama\u00f1o (nm)": {
+        "expected": 2.5,
+        "calculated": 2.762,
+        "delta_pct": 10.48,
+        "ok": true
+      },
+      "Potencia (W)": {
+        "expected": 27.0,
+        "calculated": 12.0,
+        "delta_pct": 55.55555555555556,
+        "ok": false
+      }
+    },
+    "result": {
+      "production_mg_h": 167.76246052932512,
+      "wavelength_nm": 505.77638648329895,
+      "size_nm": 2.762,
+      "power_w": 12.0,
+      "energy_density_j_ml": 144.0,
+      "residence_time_s": 17.28,
+      "monodispersity": 0.95,
+      "in_spec": false,
+      "efficiency_score": 26.710498421173003,
+      "feasibility_score": 75.0
+    }
+  },
+  "cross_validation": {
+    "mean_discrepancy_pct": 0.0,
+    "max_discrepancy_pct": 0.0,
+    "consistent": true
+  },
+  "optimization": {
+    "n_evaluated": 2000,
+    "n_in_spec": 175,
+    "n_feasible": 175,
+    "best": {
+      "n_channels": 16,
+      "channel_length_mm": 500.0,
+      "flow_ml_min": 15.0,
+      "voltage_kv": 12.0,
+      "frequency_khz": 30.0,
+      "pulse_width_ns": 100.0,
+      "production_mg_h": 1619.7741348621546,
+      "wavelength_nm": 461.62835455282743,
+      "size_nm": 2.4739999999999998,
+      "power_w": 86.4,
+      "energy_density_j_ml": 345.6,
+      "monodispersity": 0.95,
+      "in_spec": true,
+      "efficiency_score": 90.0,
+      "feasibility_score": 75.0,
+      "cost_score": 41.68000000000001,
+      "max_temp_C": 49.76827520305781,
+      "cooling_ok": true,
+      "specific_energy_kJ_g": 192.02677293428323,
+      "production_per_watt": 18.747385820163824,
+      "score_total": 0.9283773098575223
+    },
+    "top5": [
+      {
+        "n_channels": 16,
+        "channel_length_mm": 500.0,
+        "flow_ml_min": 15.0,
+        "voltage_kv": 12.0,
+        "frequency_khz": 30.0,
+        "pulse_width_ns": 100.0,
+        "production_mg_h": 1619.7741348621546,
+        "wavelength_nm": 461.62835455282743,
+        "size_nm": 2.4739999999999998,
+        "power_w": 86.4,
+        "energy_density_j_ml": 345.6,
+        "monodispersity": 0.95,
+        "in_spec": true,
+        "efficiency_score": 90.0,
+        "feasibility_score": 75.0,
+        "cost_score": 41.68000000000001,
+        "max_temp_C": 49.76827520305781,
+        "cooling_ok": true,
+        "specific_energy_kJ_g": 192.02677293428323,
+        "production_per_watt": 18.747385820163824,
+        "score_total": 0.9283773098575223
+      },
+      {
+        "n_channels": 16,
+        "channel_length_mm": 300.0,
+        "flow_ml_min": 10.0,
+        "voltage_kv": 15.0,
+        "frequency_khz": 20.0,
+        "pulse_width_ns": 50.0,
+        "production_mg_h": 1009.7171337053021,
+        "wavelength_nm": 459.64495223446244,
+        "size_nm": 2.462,
+        "power_w": 54.0,
+        "energy_density_j_ml": 324.0,
+        "monodispersity": 0.95,
+        "in_spec": true,
+        "efficiency_score": 90.0,
+        "feasibility_score": 75.0,
+        "cost_score": 43.3,
+        "max_temp_C": 48.2202580028667,
+        "cooling_ok": true,
+        "specific_energy_kJ_g": 192.5291683291748,
+        "production_per_watt": 18.698465438987075,
+        "score_total": 0.9282986875209143
+      },
+      {
+        "n_channels": 32,
+        "channel_length_mm": 200.0,
+        "flow_ml_min": 15.0,
+        "voltage_kv": 15.0,
+        "frequency_khz": 20.0,
+        "pulse_width_ns": 100.0,
+        "production_mg_h": 1302.9192633502605,
+        "wavelength_nm": 461.6283545528275,
+        "size_nm": 2.474,
+        "power_w": 72.0,
+        "energy_density_j_ml": 288.0,
+        "monodispersity": 0.95,
+        "in_spec": true,
+        "efficiency_score": 90.0,
+        "feasibility_score": 75.0,
+        "cost_score": 18.400000000000006,
+        "max_temp_C": 45.64022933588151,
+        "cooling_ok": true,
+        "specific_energy_kJ_g": 198.93788302239562,
+        "production_per_watt": 18.09610087986473,
+        "score_total": 0.9273056731102911
+      },
+      {
+        "n_channels": 16,
+        "channel_length_mm": 400.0,
+        "flow_ml_min": 15.0,
+        "voltage_kv": 15.0,
+        "frequency_khz": 20.0,
+        "pulse_width_ns": 50.0,
+        "production_mg_h": 1302.9192633502605,
+        "wavelength_nm": 461.6283545528275,
+        "size_nm": 2.474,
+        "power_w": 72.0,
+        "energy_density_j_ml": 288.0,
+        "monodispersity": 0.95,
+        "in_spec": true,
+        "efficiency_score": 90.0,
+        "feasibility_score": 75.0,
+        "cost_score": 42.400000000000006,
+        "max_temp_C": 45.64022933588151,
+        "cooling_ok": true,
+        "specific_energy_kJ_g": 198.93788302239562,
+        "production_per_watt": 18.09610087986473,
+        "score_total": 0.9273056731102911
+      },
+      {
+        "n_channels": 16,
+        "channel_length_mm": 400.0,
+        "flow_ml_min": 15.0,
+        "voltage_kv": 15.0,
+        "frequency_khz": 20.0,
+        "pulse_width_ns": 50.0,
+        "production_mg_h": 1302.9192633502605,
+        "wavelength_nm": 461.6283545528275,
+        "size_nm": 2.474,
+        "power_w": 72.0,
+        "energy_density_j_ml": 288.0,
+        "monodispersity": 0.95,
+        "in_spec": true,
+        "efficiency_score": 90.0,
+        "feasibility_score": 75.0,
+        "cost_score": 42.400000000000006,
+        "max_temp_C": 45.64022933588151,
+        "cooling_ok": true,
+        "specific_energy_kJ_g": 198.93788302239562,
+        "production_per_watt": 18.09610087986473,
+        "score_total": 0.9273056731102911
+      }
+    ],
+    "improvement_pct": 220.7473534380504
+  },
+  "sensitivity": {
+    "n_channels": {
+      "values": [
+        4.0,
+        6.0,
+        8.0,
+        10.0,
+        12.0,
+        16.0,
+        24.0,
+        32.0
+      ],
+      "production": [
+        37.892681064600744,
+        82.57802622389995,
+        167.76246052932512,
+        250.21367695073724,
+        282.2234859975683,
+        248.91992555039377,
+        44.730306095850004,
+        237.26272703882964
+      ],
+      "wavelength": [
+        491.78088193657914,
+        498.86611464476937,
+        505.77638648329895,
+        512.5150294569504,
+        519.0854686846403,
+        531.7357765971238,
+        555.1744446998807,
+        576.3221802061505
+      ],
+      "power": [
+        6.0,
+        9.0,
+        12.0,
+        15.0,
+        18.0,
+        24.0,
+        36.0,
+        48.0
+      ],
+      "specific_energy": [
+        570.0309239975809,
+        392.3561930646231,
+        257.5069527693806,
+        215.8155407733034,
+        229.60527105302052,
+        347.0995735233271,
+        2897.36447862189,
+        728.3065576993057
+      ],
+      "elasticity": 1.965903841926532,
+      "optimal_value": 12.0,
+      "optimal_production": 282.2234859975683,
+      "base_value": 8.0
+    },
+    "channel_length_mm": {
+      "values": [
+        100.0,
+        150.0,
+        200.0,
+        250.0,
+        300.0,
+        400.0,
+        500.0
+      ],
+      "production": [
+        17.130957256262075,
+        37.892681064600744,
+        73.3446270687918,
+        106.23574935194326,
+        167.76246052932512,
+        264.0164100805375,
+        285.7494164806811
+      ],
+      "wavelength": [
+        488.05056557577706,
+        491.78088193657914,
+        496.52397192642906,
+        501.18881630860085,
+        505.77638648329895,
+        514.723693767388,
+        523.3740395135472
+      ],
+      "power": [
+        4.0,
+        6.0,
+        8.0,
+        10.0,
+        12.0,
+        16.0,
+        20.0
+      ],
+      "specific_energy": [
+        840.5834994851909,
+        570.0309239975809,
+        392.66679988689214,
+        338.8689797888783,
+        257.5069527693806,
+        218.16825697474363,
+        251.96901847345598
+      ],
+      "elasticity": 1.7212542528437775,
+      "optimal_value": 500.0,
+      "optimal_production": 285.7494164806811,
+      "base_value": 300.0
+    },
+    "flow_ml_min": {
+      "values": [
+        1.0,
+        2.0,
+        3.0,
+        5.0,
+        8.0,
+        10.0,
+        15.0,
+        20.0,
+        30.0
+      ],
+      "production": [
+        25.18201798088419,
+        53.8835118616667,
+        171.44964988840866,
+        167.76246052932512,
+        126.89422783391771,
+        100.96834473322144,
+        70.00969110036478,
+        56.59231294244474,
+        26.798373418599805
+      ],
+      "wavelength": [
+        595.4031678506128,
+        543.7558187496318,
+        523.3740395135472,
+        505.77638648329895,
+        495.3455723840202,
+        491.78088193657914,
+        486.9585996076059,
+        484.5174730626492,
+        482.0562063703095
+      ],
+      "power": [
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0
+      ],
+      "specific_energy": [
+        1715.5098544045738,
+        801.7294810127797,
+        251.96901847345598,
+        257.5069527693806,
+        340.44101719537014,
+        427.8568705285111,
+        617.05742906463,
+        763.3545574278802,
+        1612.0381384795692
+      ],
+      "elasticity": -0.40601288836667954,
+      "optimal_value": 3.0,
+      "optimal_production": 171.44964988840866,
+      "base_value": 5.0
+    },
+    "voltage_kv": {
+      "values": [
+        6.0,
+        8.0,
+        10.0,
+        12.0,
+        15.0,
+        18.0,
+        20.0
+      ],
+      "production": [
+        40.012589726686095,
+        96.88523765895536,
+        167.76246052932512,
+        298.1057148308371,
+        504.85856685265105,
+        600.0,
+        549.5461344759522
+      ],
+      "wavelength": [
+        526.7528944747315,
+        517.7846701585155,
+        505.77638648329895,
+        490.3425548051953,
+        459.64495223446244,
+        417.8921555958819,
+        382.58548244622904
+      ],
+      "power": [
+        4.32,
+        7.6800000000000015,
+        12.0,
+        17.28,
+        27.0,
+        38.88,
+        48.0
+      ],
+      "specific_energy": [
+        388.6776663602884,
+        285.36855219701704,
+        257.5069527693806,
+        208.67764992462665,
+        192.5291683291748,
+        233.28000000000003,
+        314.4412982993362
+      ],
+      "elasticity": 3.88475627653088,
+      "optimal_value": 18.0,
+      "optimal_production": 600.0,
+      "base_value": 10.0
+    },
+    "frequency_khz": {
+      "values": [
+        5.0,
+        10.0,
+        15.0,
+        20.0,
+        25.0,
+        30.0
+      ],
+      "production": [
+        23.931834482269675,
+        65.54400494454744,
+        105.75633387079185,
+        167.76246052932512,
+        250.94757674719247,
+        313.3039010958547
+      ],
+      "wavelength": [
+        530.1895455851852,
+        522.3087024287275,
+        514.1732728382445,
+        505.77638648329895,
+        497.1113368329368,
+        488.1716452213917
+      ],
+      "power": [
+        3.0,
+        6.0,
+        9.0,
+        12.0,
+        15.0,
+        18.0
+      ],
+      "specific_energy": [
+        451.28174390481314,
+        329.5495906646896,
+        306.364629087699,
+        257.5069527693806,
+        215.18438512120096,
+        206.82793853937545
+      ],
+      "elasticity": 1.9834023882435001,
+      "optimal_value": 30.0,
+      "optimal_production": 313.3039010958547,
+      "base_value": 20.0
+    },
+    "pulse_width_ns": {
+      "values": [
+        50.0,
+        100.0,
+        150.0,
+        200.0,
+        300.0,
+        400.0,
+        500.0
+      ],
+      "production": [
+        167.76246052932512,
+        167.76246052932512,
+        167.76246052932512,
+        163.51748165699996,
+        163.51748165699996,
+        163.51748165699996,
+        159.27250278467483
+      ],
+      "wavelength": [
+        505.77638648329895,
+        505.77638648329895,
+        505.77638648329895,
+        505.77638648329895,
+        505.77638648329895,
+        505.77638648329895,
+        505.77638648329895
+      ],
+      "power": [
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0,
+        12.0
+      ],
+      "specific_energy": [
+        257.5069527693806,
+        257.5069527693806,
+        257.5069527693806,
+        264.1919357015163,
+        264.1919357015163,
+        264.1919357015163,
+        271.2332590039308
+      ],
+      "elasticity": 0.0,
+      "optimal_value": 50.0,
+      "optimal_production": 167.76246052932512,
+      "base_value": 100.0
+    }
+  }
+}

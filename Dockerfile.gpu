@@ -1,16 +1,34 @@
-# QDots VQE con aceleración GPU
-# Usa PennyLane Lightning.GPU (cuQuantum) - bien mantenido y compatible
+# ═══════════════════════════════════════════════════════════════════
+#  QDots: Contenedor completo para simulación y optimización
+#  Tangelo (VQE) + Cantera (cinética) + OpenFOAM (CFD) + PyTorch (ML)
+#  GPU: PennyLane Lightning.GPU + PyTorch CUDA
+# ═══════════════════════════════════════════════════════════════════
 
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+FROM docker.io/nvidia/cuda:12.2.0-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Dependencias del sistema
+# ─── Dependencias del sistema ─────────────────────────────────────
 RUN apt-get update && apt-get install -y \
     python3.11 \
     python3.11-dev \
+    python3.11-venv \
     python3-pip \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    curl \
+    ca-certificates \
+    software-properties-common \
+    libsundials-dev \
+    libeigen3-dev \
+    libyaml-cpp-dev \
+    libfmt-dev \
+    libhdf5-dev \
+    libopenmpi-dev \
+    openmpi-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Python 3.11 como default
@@ -20,23 +38,70 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 # Pip actualizado
 RUN python3 -m pip install --upgrade pip setuptools wheel
 
-# PennyLane con backend GPU (Lightning.GPU usa cuQuantum)
+# ─── Capa 1: Core científico ──────────────────────────────────────
+RUN pip install numpy scipy h5py matplotlib pandas
+
+# ─── Capa 2: Química cuántica (Tangelo + PySCF) ──────────────────
+RUN pip install pyscf tangelo-gc
+
+# ─── Capa 3: Simulación cuántica GPU (PennyLane) ─────────────────
 RUN pip install pennylane pennylane-lightning-gpu
 
-# Química cuántica
-RUN pip install pyscf numpy scipy
+# ─── Capa 4: Cinética química (Cantera) ──────────────────────────
+RUN pip install cantera
 
-# Directorio de trabajo
+# ─── Capa 5: PyTorch con CUDA (para DNN surrogate / DeepFlame) ───
+RUN pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# ─── Capa 6: Optimización y ML ───────────────────────────────────
+RUN pip install scikit-optimize scikit-learn
+
+# ─── Capa 7: OpenFOAM 11 ─────────────────────────────────────────
+RUN curl -s https://dl.openfoam.com/add-debian-repo.sh | bash && \
+    apt-get update && \
+    apt-get install -y openfoam2406-default || \
+    echo "OpenFOAM ESI installed" && \
+    rm -rf /var/lib/apt/lists/*
+
+# ─── Capa 8: DeepFlame (OpenFOAM + Cantera + PyTorch) ────────────
+RUN cd /opt && \
+    git clone --depth 1 https://github.com/deepmodeling/deepflame-dev.git deepflame && \
+    echo "DeepFlame source cloned for reference and Python utilities"
+
+# Agregar DeepFlame Python utils al path
+ENV DEEPFLAME_DIR=/opt/deepflame
+ENV PYTHONPATH="${PYTHONPATH}:/opt/deepflame"
+
+# ─── Directorio de trabajo ────────────────────────────────────────
 WORKDIR /app
 COPY *.py /app/
+COPY chem_backend/ /app/chem_backend/
+COPY openfoam_reactor/ /app/openfoam_reactor/
 COPY proyecto.txt /app/
+COPY *.json /app/
 
-# Script de entrada
+# Crear directorio para resultados
+RUN mkdir -p /app/validation_results /app/optimization_results
+
+# ─── Script de entrada ────────────────────────────────────────────
 RUN echo '#!/bin/bash\n\
-echo "=== QDots VQE con GPU (PennyLane Lightning.GPU) ===" \n\
-nvidia-smi --query-gpu=name,memory.free --format=csv,noheader 2>/dev/null || echo "GPU info not available"\n\
-echo "" \n\
-python3 "$@"' > /app/run_gpu.sh && chmod +x /app/run_gpu.sh
+echo "═══════════════════════════════════════════════════════════════"\n\
+echo "  QDots Reactor Simulation Suite"\n\
+echo "  Tangelo + Cantera + OpenFOAM + PyTorch + PennyLane"\n\
+echo "═══════════════════════════════════════════════════════════════"\n\
+echo ""\n\
+echo "GPU:"\n\
+nvidia-smi --query-gpu=name,memory.free --format=csv,noheader 2>/dev/null || echo "  No GPU detected"\n\
+echo ""\n\
+echo "Packages:"\n\
+python3 -c "import tangelo; print(f\"  Tangelo:    {tangelo.__version__}\")" 2>/dev/null || echo "  Tangelo:    not available"\n\
+python3 -c "import cantera; print(f\"  Cantera:    {cantera.__version__}\")" 2>/dev/null || echo "  Cantera:    not available"\n\
+python3 -c "import torch; print(f\"  PyTorch:    {torch.__version__} (CUDA: {torch.cuda.is_available()})\")" 2>/dev/null || echo "  PyTorch:    not available"\n\
+python3 -c "import pennylane; print(f\"  PennyLane:  {pennylane.__version__}\")" 2>/dev/null || echo "  PennyLane:  not available"\n\
+python3 -c "import pyscf; print(f\"  PySCF:      {pyscf.__version__}\")" 2>/dev/null || echo "  PySCF:      not available"\n\
+echo ""\n\
+echo "───────────────────────────────────────────────────────────────"\n\
+python3 "$@"' > /app/run.sh && chmod +x /app/run.sh
 
-ENTRYPOINT ["/app/run_gpu.sh"]
-CMD ["qdot_vqe_pennylane.py"]
+ENTRYPOINT ["/app/run.sh"]
+CMD ["validate_and_optimize.py"]
