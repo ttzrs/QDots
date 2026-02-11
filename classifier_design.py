@@ -89,6 +89,13 @@ class ExcitationMode(Enum):
     OPTOTHERMAL = "optothermal"    # Laser + sustrato absorbente (oro)
 
 
+class RecirculationStageType(Enum):
+    """Tipos de etapa en el sistema de recirculacion"""
+    SIZE_PREFILTER = "size_prefilter"        # Pre-filtrado por tamano (DLD/membrana)
+    QDOT_SEPARATION = "qdot_separation"      # Separar QDots de no-QDots (N pasadas)
+    QUALITY_REFINEMENT = "quality_refinement" # Refinar calidad de QDots (M etapas)
+
+
 # ===============================================================================
 #  ESTRUCTURAS DE DATOS
 # ===============================================================================
@@ -225,6 +232,92 @@ class ClassifierOutput:
     efficiency_score: float = 0.0
     cost_score: float = 0.0
     feasibility_score: float = 0.0
+
+
+# ===============================================================================
+#  ESTRUCTURAS DE DATOS - SISTEMA DE RECIRCULACION MULTI-ETAPA
+# ===============================================================================
+
+@dataclass
+class ChamberEnergyState:
+    """Estado energetico de una camara de recirculacion"""
+    pass_number: int = 0                    # Numero de pasada actual
+    T_fluid_K: float = 298.15              # Temperatura actual del fluido (K)
+    T_fluid_initial_K: float = 298.15      # Temperatura inicial (referencia)
+    dT_accumulated_K: float = 0.0          # Calentamiento acumulado del fluido
+    energy_deposited_J: float = 0.0        # Energia total depositada en la camara
+    viscosity_Pa_s: float = 0.001          # Viscosidad actual (depende de T)
+    D_brownian_factor: float = 1.0         # Factor multiplicador de difusion por T
+    soret_factor: float = 1.0             # Factor multiplicador de Soret por T
+    thermal_equilibrium_time_s: float = 0.0  # Tiempo para disipar calor entre pasadas
+
+
+@dataclass
+class RecirculationPassResult:
+    """Resultado de una pasada individual de recirculacion"""
+    pass_number: int
+    stage_type: str                         # Tipo de etapa
+    # Concentraciones de entrada
+    n_qdots_in: float                       # Numero relativo de QDots entrantes
+    n_nonqdots_in: float                    # Numero relativo de no-QDots entrantes
+    n_total_in: float                       # Total entrantes
+    # Concentraciones de salida (puerto superior = QDots colectados)
+    n_qdots_collected: float                # QDots colectados (puerto superior)
+    n_nonqdots_collected: float             # No-QDots que se colaron (contaminacion)
+    n_qdots_waste: float                    # QDots perdidos (puerto inferior/waste)
+    n_nonqdots_waste: float                 # No-QDots correctamente descartados
+    # Metricas de calidad
+    purity: float                           # QDots / total colectados
+    recovery: float                         # QDots colectados / QDots entrantes
+    enrichment_factor: float                # Mejora de pureza vs entrada
+    # Estado energetico
+    energy_state: ChamberEnergyState = field(default_factory=ChamberEnergyState)
+    # Potencia aplicada (ajustada dinamicamente)
+    laser_power_applied_mw: float = 0.0
+    separation_efficiency: float = 0.0
+
+
+@dataclass
+class RecirculationStageConfig:
+    """Configuracion de una etapa de recirculacion"""
+    stage_type: RecirculationStageType
+    n_passes: int = 5                       # Numero de recirculaciones
+    # Pre-filtrado por tamano
+    size_cutoff_low_nm: float = 1.0         # Tamano minimo (nm)
+    size_cutoff_high_nm: float = 6.0        # Tamano maximo (nm)
+    prefilter_efficiency: float = 0.95      # Eficiencia del pre-filtro
+    # Energia y potencia
+    initial_laser_power_mw: float = 500.0   # Potencia laser inicial
+    power_adjustment_strategy: str = "adaptive"  # "fixed", "linear_decay", "adaptive"
+    min_power_mw: float = 50.0              # Potencia minima permitida
+    max_power_mw: float = 1000.0            # Potencia maxima permitida
+    # Termica entre pasadas
+    cooling_time_s: float = 5.0             # Tiempo de enfriamiento entre pasadas
+    cooling_efficiency: float = 0.7         # Fraccion de calor disipado entre pasadas
+    # Refinamiento de calidad
+    target_wavelength_nm: float = 405.0     # Lambda de excitacion
+    target_purity: float = 0.99             # Pureza objetivo (para parada temprana)
+    target_size_center_nm: float = 3.0      # Tamano central objetivo
+    target_size_tolerance_nm: float = 0.5   # Tolerancia de tamano
+
+
+@dataclass
+class MultiStageOutput:
+    """Salida del sistema de recirculacion multi-etapa completo"""
+    # Etapas
+    stages: list = field(default_factory=list)     # Lista de resultados por etapa
+    # Metricas finales
+    final_purity: float = 0.0                      # Pureza final de QDots
+    final_recovery: float = 0.0                     # Recuperacion total
+    total_enrichment: float = 0.0                   # Factor de enriquecimiento total
+    total_passes: int = 0                           # Pasadas totales ejecutadas
+    total_energy_J: float = 0.0                     # Energia total consumida
+    total_time_s: float = 0.0                       # Tiempo total de proceso
+    # Distribucion de tamanos final
+    size_distribution_center_nm: float = 0.0
+    size_distribution_sigma_nm: float = 0.0
+    # Calidad
+    quality_score: float = 0.0                      # Puntuacion global (0-100)
 
 
 # ===============================================================================
@@ -1806,6 +1899,1024 @@ class ClassifierDesigner:
 
 
 # ===============================================================================
+#  SISTEMA DE RECIRCULACION MULTI-ETAPA
+# ===============================================================================
+
+class MultiStageRecirculationSystem:
+    """
+    Sistema de clasificacion multi-etapa con recirculacion para maxima
+    calidad de separacion de CQDs.
+
+    Arquitectura de 3 etapas:
+
+      ETAPA 1: PRE-FILTRADO POR TAMANO
+        - Retiene particulas en rango 1-6 nm (tamano QDot)
+        - Elimina agregados, debris grande, moleculas pequenas
+        - Metodo: DLD (Deterministic Lateral Displacement) o membrana nanometrica
+
+      ETAPA 2: SEPARACION QDot vs NO-QDot (N recirculaciones)
+        - Recircula N veces las particulas pre-filtradas
+        - Cada pasada: optotermico separa QDots (absorben) de no-QDots (no absorben)
+        - Los QDots colectados se recirculan; los residuos se descartan
+        - Modelo de acumulacion de energia en la camara
+        - Potencia laser ajustada dinamicamente por pasada
+
+      ETAPA 3: REFINAMIENTO DE CALIDAD (M etapas)
+        - Toma QDots separados y refina por tamano/calidad
+        - Cada etapa usa lambda de excitacion progresivamente selectiva
+        - Energia ajustada para maxima selectividad size-dependent
+        - Acumula energia de pasadas anteriores: ajuste compensatorio
+
+    Modelo de acumulacion de energia:
+      - Cada pasada deposita E = P_laser * t_residencia * absorptancia
+      - El fluido se calienta: dT = E / (m_fluido * Cp)
+      - Entre pasadas se enfria parcialmente (cooling_efficiency)
+      - La temperatura acumulada afecta:
+        * Viscosidad: mu(T) = mu_ref * exp(A*(1/T - 1/T_ref))  (Arrhenius)
+        * Difusion browniana: D ~ T/mu  (Stokes-Einstein)
+        * Coeficiente de Soret: S_T(T) ~ 1/T^2  (decrece con T)
+        * Eficiencia de separacion: cambia por competencia D vs v_thermo
+    """
+
+    # Propiedades termicas del agua
+    CP_WATER = 4186.0             # Capacidad calorifica del agua (J/kg/K)
+    ARRHENIUS_A = 1890.0          # Constante de Arrhenius para viscosidad del agua (K)
+    MU_REF = 0.001                # Viscosidad de referencia a 298.15 K (Pa.s)
+    T_REF = 298.15                # Temperatura de referencia (K)
+
+    def __init__(self, base_params: Optional[ClassifierParameters] = None,
+                 zones_config: Optional[List[Dict]] = None):
+        self.base_params = base_params or ClassifierParameters()
+        self.zones_config = zones_config or DEFAULT_ZONES_CONFIG
+        self.output = MultiStageOutput()
+
+        # Disenador base (para calculos de fisica de zona)
+        self._base_designer = ClassifierDesigner(self.base_params, self.zones_config)
+
+    # ===========================================================================
+    #  MODELO DE ACUMULACION DE ENERGIA EN CAMARAS
+    # ===========================================================================
+
+    def _calculate_energy_per_pass(self, laser_power_mw: float,
+                                    residence_time_s: float) -> float:
+        """Energia depositada en el fluido por pasada (J)"""
+        P_W = laser_power_mw * 1e-3
+        absorptance = self.base_params.substrate_absorptance
+        # Fraccion de calor transferida al fluido (~60% del calor del sustrato)
+        fluid_heat_fraction = 0.6
+        return P_W * absorptance * fluid_heat_fraction * residence_time_s
+
+    def _calculate_fluid_heating(self, energy_J: float,
+                                  fluid_volume_ml: float) -> float:
+        """Calentamiento del fluido por energia depositada (K)"""
+        mass_kg = fluid_volume_ml * 1e-6 * DENSITY_WATER  # mL -> m^3 -> kg
+        if mass_kg <= 0:
+            return 0.0
+        return energy_J / (mass_kg * self.CP_WATER)
+
+    def _viscosity_at_temperature(self, T_K: float) -> float:
+        """Viscosidad del agua a temperatura T usando modelo Arrhenius"""
+        return self.MU_REF * np.exp(self.ARRHENIUS_A * (1.0 / T_K - 1.0 / self.T_REF))
+
+    def _soret_at_temperature(self, T_K: float, S_T_ref: float = None) -> float:
+        """Coeficiente de Soret ajustado por temperatura
+        S_T disminuye con T: S_T(T) ~ S_T_ref * (T_ref/T)^2
+        """
+        if S_T_ref is None:
+            S_T_ref = self.base_params.soret_coefficient
+        return S_T_ref * (self.T_REF / T_K) ** 2
+
+    def _update_energy_state(self, state: ChamberEnergyState,
+                              energy_deposited_J: float,
+                              fluid_volume_ml: float,
+                              cooling_time_s: float = 0.0,
+                              cooling_efficiency: float = 0.7) -> ChamberEnergyState:
+        """Actualiza el estado energetico de la camara tras una pasada"""
+        new_state = ChamberEnergyState(
+            pass_number=state.pass_number + 1,
+            T_fluid_initial_K=state.T_fluid_initial_K,
+        )
+
+        # Calentamiento de esta pasada
+        dT_this_pass = self._calculate_fluid_heating(energy_deposited_J, fluid_volume_ml)
+
+        # Enfriamiento parcial del calor acumulado entre pasadas
+        dT_after_cooling = state.dT_accumulated_K * (1.0 - cooling_efficiency)
+
+        # Nuevo dT acumulado
+        new_state.dT_accumulated_K = dT_after_cooling + dT_this_pass
+        new_state.T_fluid_K = state.T_fluid_initial_K + new_state.dT_accumulated_K
+
+        # Energia total depositada
+        new_state.energy_deposited_J = state.energy_deposited_J + energy_deposited_J
+
+        # Propiedades actualizadas
+        new_state.viscosity_Pa_s = self._viscosity_at_temperature(new_state.T_fluid_K)
+
+        # Factor de difusion browniana: D ~ T/mu
+        D_ratio = (new_state.T_fluid_K / self.T_REF) * (self.MU_REF / new_state.viscosity_Pa_s)
+        new_state.D_brownian_factor = D_ratio
+
+        # Factor de Soret: disminuye con T
+        S_T_current = self._soret_at_temperature(new_state.T_fluid_K)
+        new_state.soret_factor = S_T_current / self.base_params.soret_coefficient
+
+        # Tiempo de equilibrio termico
+        new_state.thermal_equilibrium_time_s = cooling_time_s
+
+        return new_state
+
+    # ===========================================================================
+    #  AJUSTE DINAMICO DE POTENCIA
+    # ===========================================================================
+
+    def _adjust_power(self, strategy: str, pass_number: int, n_total_passes: int,
+                      initial_power_mw: float, min_power_mw: float,
+                      max_power_mw: float, energy_state: ChamberEnergyState,
+                      current_purity: float = 0.0,
+                      target_purity: float = 0.99) -> float:
+        """
+        Calcula potencia laser optima para la pasada actual.
+
+        Estrategias:
+          - "fixed": potencia constante
+          - "linear_decay": reduce linealmente para compensar acumulacion termica
+          - "adaptive": ajusta segun estado energetico y pureza actual
+        """
+        if strategy == "fixed":
+            return initial_power_mw
+
+        elif strategy == "linear_decay":
+            # Reducir potencia linealmente con las pasadas
+            fraction = 1.0 - 0.5 * (pass_number / max(n_total_passes, 1))
+            return np.clip(initial_power_mw * fraction, min_power_mw, max_power_mw)
+
+        elif strategy == "adaptive":
+            # Estrategia inteligente: compensar acumulacion termica
+
+            # 1. Compensar calentamiento del fluido
+            # A mayor T, el Soret baja -> necesitamos mas potencia para compensar
+            # PERO el fluido mas caliente tambien reduce viscosidad -> mas difusion
+            soret_compensation = 1.0 / max(energy_state.soret_factor, 0.01)
+
+            # 2. Si la pureza ya es alta, reducir potencia para evitar
+            #    sobre-calentamiento y maximizar selectividad
+            if current_purity > 0.9:
+                selectivity_factor = 0.5 + 0.5 * (1.0 - current_purity)
+            else:
+                selectivity_factor = 1.0
+
+            # 3. En las primeras pasadas: maxima potencia para rapida separacion
+            #    En las ultimas: menor potencia para maxima selectividad
+            phase_factor = 1.0 - 0.3 * (pass_number / max(n_total_passes, 1))
+
+            power = initial_power_mw * soret_compensation * selectivity_factor * phase_factor
+
+            # 4. Limite duro: si dT > 10K, forzar reduccion de potencia
+            if energy_state.dT_accumulated_K > 10.0:
+                overheat_factor = 10.0 / max(energy_state.dT_accumulated_K, 0.01)
+                power *= overheat_factor
+
+            return np.clip(power, min_power_mw, max_power_mw)
+
+        return initial_power_mw
+
+    # ===========================================================================
+    #  ETAPA 1: PRE-FILTRADO POR TAMANO
+    # ===========================================================================
+
+    def run_size_prefilter(self, config: RecirculationStageConfig,
+                           n_total_particles: float = 1000.0,
+                           qdot_fraction: float = 0.05,
+                           size_in_range_fraction: float = 0.15) -> List[RecirculationPassResult]:
+        """
+        Pre-filtra particulas por tamano.
+        Solo retiene las que estan en el rango de tamano de QDots.
+
+        Modelo:
+          - Fraccion de particulas en rango correcto: size_in_range_fraction
+          - De esas, una fraccion son QDots reales: qdot_fraction (del total)
+          - Pre-filtro retiene con eficiencia prefilter_efficiency
+          - Un leak_fraction de particulas fuera de rango pasan como contaminacion
+
+        Retorna una sola pasada (el pre-filtro no se recircula normalmente).
+        """
+        results = []
+
+        # Particulas entrantes
+        n_qdots = n_total_particles * qdot_fraction
+        n_in_range_nonqdots = n_total_particles * (size_in_range_fraction - qdot_fraction)
+        n_out_of_range = n_total_particles * (1.0 - size_in_range_fraction)
+
+        # Pre-filtro: retiene particulas en rango [size_cutoff_low, size_cutoff_high]
+        eff = config.prefilter_efficiency
+        leak = 1.0 - eff  # Fraccion de fuera-de-rango que se cuela
+
+        # QDots (estan en rango): pasan con alta eficiencia
+        n_qdots_out = n_qdots * eff
+        n_qdots_lost = n_qdots * (1.0 - eff)
+
+        # No-QDots en rango: tambien pasan
+        n_nonqdots_in_range_out = n_in_range_nonqdots * eff
+
+        # Particulas fuera de rango: leak
+        n_leaked = n_out_of_range * leak * 0.1  # Solo una fraccion del leak pasa
+
+        # Total colectado
+        n_collected_qdots = n_qdots_out
+        n_collected_nonqdots = n_nonqdots_in_range_out + n_leaked
+        n_total_collected = n_collected_qdots + n_collected_nonqdots
+
+        # Pureza y recuperacion
+        purity = n_collected_qdots / max(n_total_collected, 1e-10)
+        recovery = n_collected_qdots / max(n_qdots, 1e-10)
+
+        # Input purity for enrichment calculation
+        input_purity = qdot_fraction
+        enrichment = purity / max(input_purity, 1e-10)
+
+        result = RecirculationPassResult(
+            pass_number=1,
+            stage_type="SIZE_PREFILTER",
+            n_qdots_in=n_qdots,
+            n_nonqdots_in=n_total_particles - n_qdots,
+            n_total_in=n_total_particles,
+            n_qdots_collected=n_collected_qdots,
+            n_nonqdots_collected=n_collected_nonqdots,
+            n_qdots_waste=n_qdots_lost,
+            n_nonqdots_waste=(n_total_particles - n_qdots) - n_collected_nonqdots,
+            purity=purity,
+            recovery=recovery,
+            enrichment_factor=enrichment,
+            energy_state=ChamberEnergyState(),
+            laser_power_applied_mw=0.0,
+            separation_efficiency=eff,
+        )
+        results.append(result)
+        return results
+
+    # ===========================================================================
+    #  ETAPA 2: SEPARACION QDot vs NO-QDot (N RECIRCULACIONES)
+    # ===========================================================================
+
+    def run_qdot_separation(self, config: RecirculationStageConfig,
+                             n_qdots_in: float,
+                             n_nonqdots_in: float) -> List[RecirculationPassResult]:
+        """
+        Recircula N veces para separar QDots de no-QDots.
+
+        Cada pasada:
+          1. Calcula potencia optima (ajuste dinamico)
+          2. Ejecuta separacion optothermica
+          3. QDots absorbentes migran al puerto superior (colectados)
+          4. No-QDots sin absorcion van al waste
+          5. La fraccion colectada se recircula para la siguiente pasada
+          6. Actualiza estado energetico de la camara
+
+        Los QDots absorben y migran; los no-QDots no absorben.
+        Pero hay contaminacion: algunos no-QDots son arrastrados.
+        Cada recirculacion reduce la contaminacion exponencialmente.
+        """
+        results = []
+        p = self.base_params
+
+        # Estado energetico inicial
+        energy_state = ChamberEnergyState(T_fluid_K=p.temperature_c + 273.15,
+                                           T_fluid_initial_K=p.temperature_c + 273.15)
+
+        # Geometria del separador (para calculos de residencia)
+        geometry = self._base_designer.calculate_zone_geometry()
+        fluid_volume_ml = geometry['total_volume_ml']
+        residence_time_s = geometry['zone_residence_time_s']
+
+        # Concentraciones actuales (van cambiando con cada pasada)
+        current_qdots = n_qdots_in
+        current_nonqdots = n_nonqdots_in
+
+        for pass_num in range(1, config.n_passes + 1):
+            n_total = current_qdots + current_nonqdots
+            if n_total < 1e-10:
+                break
+
+            input_purity = current_qdots / n_total
+
+            # 1. Ajustar potencia laser
+            power_mw = self._adjust_power(
+                config.power_adjustment_strategy, pass_num, config.n_passes,
+                config.initial_laser_power_mw, config.min_power_mw,
+                config.max_power_mw, energy_state, input_purity, config.target_purity)
+
+            # 2. Calcular separacion optothermica con estado energetico actual
+            sep = self._calculate_single_separation_pass(
+                power_mw, energy_state, config.target_wavelength_nm)
+
+            # Eficiencia de captura de QDots (ajustada por estado termico)
+            P_qdot_capture = sep['P_qdot_capture']
+
+            # Probabilidad de que no-QDot sea arrastrado (contaminacion)
+            # Mucho menor que P_qdot porque no absorben
+            P_nonqdot_drag = sep['P_nonqdot_drag']
+
+            # 3. Aplicar separacion
+            n_qdots_collected = current_qdots * P_qdot_capture
+            n_nonqdots_collected = current_nonqdots * P_nonqdot_drag
+            n_qdots_waste = current_qdots * (1.0 - P_qdot_capture)
+            n_nonqdots_waste = current_nonqdots * (1.0 - P_nonqdot_drag)
+
+            # Metricas
+            total_collected = n_qdots_collected + n_nonqdots_collected
+            purity = n_qdots_collected / max(total_collected, 1e-10)
+            recovery = n_qdots_collected / max(n_qdots_in, 1e-10)
+            enrichment = purity / max(input_purity, 1e-10)
+
+            # 4. Actualizar energia de la camara
+            E_pass = self._calculate_energy_per_pass(power_mw, residence_time_s)
+            energy_state = self._update_energy_state(
+                energy_state, E_pass, fluid_volume_ml,
+                config.cooling_time_s, config.cooling_efficiency)
+
+            result = RecirculationPassResult(
+                pass_number=pass_num,
+                stage_type="QDOT_SEPARATION",
+                n_qdots_in=current_qdots,
+                n_nonqdots_in=current_nonqdots,
+                n_total_in=n_total,
+                n_qdots_collected=n_qdots_collected,
+                n_nonqdots_collected=n_nonqdots_collected,
+                n_qdots_waste=n_qdots_waste,
+                n_nonqdots_waste=n_nonqdots_waste,
+                purity=purity,
+                recovery=recovery,
+                enrichment_factor=enrichment,
+                energy_state=ChamberEnergyState(
+                    pass_number=energy_state.pass_number,
+                    T_fluid_K=energy_state.T_fluid_K,
+                    T_fluid_initial_K=energy_state.T_fluid_initial_K,
+                    dT_accumulated_K=energy_state.dT_accumulated_K,
+                    energy_deposited_J=energy_state.energy_deposited_J,
+                    viscosity_Pa_s=energy_state.viscosity_Pa_s,
+                    D_brownian_factor=energy_state.D_brownian_factor,
+                    soret_factor=energy_state.soret_factor,
+                ),
+                laser_power_applied_mw=power_mw,
+                separation_efficiency=P_qdot_capture,
+            )
+            results.append(result)
+
+            # 5. Recircular: lo colectado es la entrada de la siguiente pasada
+            current_qdots = n_qdots_collected
+            current_nonqdots = n_nonqdots_collected
+
+            # Parada temprana si pureza objetivo alcanzada
+            if purity >= config.target_purity:
+                break
+
+        return results
+
+    def _calculate_single_separation_pass(self, laser_power_mw: float,
+                                           energy_state: ChamberEnergyState,
+                                           excitation_wavelength_nm: float) -> Dict:
+        """
+        Calcula eficiencias de separacion para una pasada individual,
+        teniendo en cuenta el estado energetico acumulado.
+        """
+        p = self.base_params
+
+        # Tamano representativo (promedio del rango tipico de CQDs)
+        representative_size_nm = 3.0
+
+        # Gradiente termico del sustrato con potencia actual
+        ot_grad = self._base_designer.calculate_optothermal_gradient(
+            laser_power_mw, p.beam_waist_um)
+
+        # Velocidad termoforetica BASE
+        thermo = self._base_designer.calculate_thermophoretic_velocity(
+            representative_size_nm, ot_grad['grad_T_K_m'],
+            laser_power_mw, p.beam_waist_um)
+        v_thermo_base = thermo['v_thermophoretic_m_s']
+
+        # Ajustar por estado energetico acumulado
+        # v_thermo = D_T * grad_T = S_T * D_brownian * grad_T
+        # S_T cambia con T, D_brownian cambia con T/mu
+        v_thermo_adjusted = v_thermo_base * energy_state.soret_factor * energy_state.D_brownian_factor
+
+        # Difusion browniana ajustada
+        brownian = self._base_designer.calculate_brownian_diffusion(representative_size_nm)
+        D_adjusted = brownian['D_m2_s'] * energy_state.D_brownian_factor
+
+        # Sedimentacion (ajustada por viscosidad)
+        sed = self._base_designer.calculate_sedimentation(representative_size_nm)
+        viscosity_ratio = VISCOSITY_WATER / max(energy_state.viscosity_Pa_s, 1e-10)
+        v_sed_adjusted = sed['v_sedimentation_m_s'] * viscosity_ratio
+
+        # Fuerzas opticas
+        laser_forces = self._base_designer.calculate_gradient_force(
+            representative_size_nm, laser_power_mw, p.beam_waist_um)
+        v_optical = laser_forces['v_total_optical_m_s']
+
+        # Velocidad total ascendente para QDots (absorben)
+        v_up_qdot = v_thermo_adjusted + v_optical
+
+        # Peclet a escala del beam waist
+        w0_m = p.beam_waist_um * 1e-6
+        Pe_qdot = v_up_qdot * w0_m / max(D_adjusted, 1e-30)
+
+        # Geometria: en modo optotermico usamos microcanal (channel_depth_um)
+        # no la altura macro de la zona (zone_height_mm)
+        geometry = self._base_designer.calculate_zone_geometry()
+        # Distancia de separacion: mitad del microcanal (particulas migran desde
+        # centro del canal hacia el sustrato caliente o lejos de el)
+        half_h = (p.channel_depth_um * 1e-6) / 2.0  # ~50 um
+        t_res = geometry['zone_residence_time_s']
+
+        # Probabilidad de captura de QDots (absorben -> migran al colector)
+        t_transit = half_h / max(v_up_qdot, 1e-30)
+        ratio = t_res / max(t_transit, 1e-30)
+        P_qdot_capture = min(0.98, 1.0 - np.exp(-max(0, ratio)))
+
+        # Probabilidad de arrastre de no-QDots (NO absorben -> solo conveccion residual)
+        # Los no-QDots experimentan termoforesis de fondo (del sustrato) pero
+        # NO tienen la contribucion de absorcion diferencial
+        # Su velocidad es solo ~10-20% de la del QDot absorbente
+        background_fraction = 0.15  # Solo termoforesis de fondo del sustrato
+        v_up_nonqdot = v_thermo_adjusted * background_fraction
+        t_transit_nonqdot = half_h / max(v_up_nonqdot, 1e-30)
+        ratio_nonqdot = t_res / max(t_transit_nonqdot, 1e-30)
+        P_nonqdot_drag = min(0.3, 1.0 - np.exp(-max(0, ratio_nonqdot)))
+
+        return {
+            'v_up_qdot_m_s': v_up_qdot,
+            'v_up_qdot_um_s': v_up_qdot * 1e6,
+            'v_up_nonqdot_m_s': v_up_nonqdot,
+            'Pe_qdot': Pe_qdot,
+            'D_adjusted_m2_s': D_adjusted,
+            'v_sed_adjusted_m_s': v_sed_adjusted,
+            'P_qdot_capture': P_qdot_capture,
+            'P_nonqdot_drag': P_nonqdot_drag,
+            'dT_substrate_K': ot_grad['dT_K'],
+            'grad_T_K_m': ot_grad['grad_T_K_m'],
+        }
+
+    # ===========================================================================
+    #  ETAPA 3: REFINAMIENTO DE CALIDAD (M ETAPAS)
+    # ===========================================================================
+
+    def run_quality_refinement(self, config: RecirculationStageConfig,
+                                n_qdots_in: float,
+                                n_nonqdots_residual: float,
+                                initial_energy_state: ChamberEnergyState = None
+                                ) -> List[RecirculationPassResult]:
+        """
+        Refina la calidad de QDots ya separados mediante recirculacion
+        con selectividad por tamano.
+
+        Cada pasada usa excitacion selectiva para retener QDots del tamano
+        objetivo y descartar los que estan fuera de tolerancia.
+
+        La energia acumulada de etapas anteriores se tiene en cuenta:
+          - QDots ya calentados necesitan menos potencia
+          - Ajuste fino de lambda para selectividad por tamano
+          - Potencia reducida progresivamente para no danar QDots
+
+        Modelo de selectividad por tamano:
+          - QDots con d ~ target_size absorben maximamente a lambda seleccionada
+          - QDots con d != target_size absorben menos -> menos fuerza -> desechados
+          - Cada pasada estrecha la distribucion de tamanos
+        """
+        results = []
+        p = self.base_params
+
+        # Estado energetico: continuar desde etapa anterior si se proporciona
+        if initial_energy_state is not None:
+            energy_state = ChamberEnergyState(
+                pass_number=initial_energy_state.pass_number,
+                T_fluid_K=initial_energy_state.T_fluid_K,
+                T_fluid_initial_K=initial_energy_state.T_fluid_initial_K,
+                dT_accumulated_K=initial_energy_state.dT_accumulated_K,
+                energy_deposited_J=initial_energy_state.energy_deposited_J,
+                viscosity_Pa_s=initial_energy_state.viscosity_Pa_s,
+                D_brownian_factor=initial_energy_state.D_brownian_factor,
+                soret_factor=initial_energy_state.soret_factor,
+            )
+        else:
+            energy_state = ChamberEnergyState(T_fluid_K=p.temperature_c + 273.15,
+                                               T_fluid_initial_K=p.temperature_c + 273.15)
+
+        geometry = self._base_designer.calculate_zone_geometry()
+        fluid_volume_ml = geometry['total_volume_ml']
+        residence_time_s = geometry['zone_residence_time_s']
+
+        # Distribucion de tamanos: modelamos como gaussiana
+        # Centro: config.target_size_center_nm
+        # Sigma inicial: amplia (entramos con QDots de 1.5-5nm)
+        current_sigma_nm = 1.0  # Desviacion estandar inicial (nm)
+        target_sigma = config.target_size_tolerance_nm / 3.0  # 3-sigma = tolerancia
+
+        current_qdots_target = n_qdots_in * 0.7   # Fraccion en el tamano objetivo
+        current_qdots_off = n_qdots_in * 0.3      # Fraccion fuera de objetivo
+        current_nonqdots = n_nonqdots_residual
+
+        for pass_num in range(1, config.n_passes + 1):
+            n_total = current_qdots_target + current_qdots_off + current_nonqdots
+            if n_total < 1e-10:
+                break
+
+            input_purity_target = current_qdots_target / max(n_total, 1e-10)
+
+            # 1. Potencia adaptativa (menor que en separacion, maxima selectividad)
+            # En refinamiento usamos menos potencia: precision > fuerza
+            refinement_power_factor = 0.5  # Usamos mitad de potencia max
+            power_mw = self._adjust_power(
+                config.power_adjustment_strategy, pass_num, config.n_passes,
+                config.initial_laser_power_mw * refinement_power_factor,
+                config.min_power_mw, config.max_power_mw * 0.7,
+                energy_state, input_purity_target, config.target_purity)
+
+            # 2. Selectividad por tamano
+            # Lambda de excitacion optimizada para target_size
+            target_emission = size_to_wavelength(config.target_size_center_nm)
+            sel_target = self._base_designer.calculate_selectivity(
+                config.target_wavelength_nm, config.target_size_center_nm)
+            # Para QDots fuera de tamano, la absorcion es menor
+            off_size = config.target_size_center_nm + 2.0 * current_sigma_nm
+            sel_off = self._base_designer.calculate_selectivity(
+                config.target_wavelength_nm, off_size)
+
+            # Ratio de selectividad tamano-dependiente
+            abs_ratio = sel_target['absorption_relative'] / max(sel_off['absorption_relative'], 1e-10)
+
+            # 3. Calcular separacion con estado energetico
+            sep = self._calculate_single_separation_pass(
+                power_mw, energy_state, config.target_wavelength_nm)
+
+            # Captura de QDots del tamano objetivo: alta eficiencia
+            P_target_capture = sep['P_qdot_capture']
+
+            # Captura de QDots fuera de tamano: menor (selectividad)
+            selectivity_penalty = min(1.0, sel_off['absorption_relative'] /
+                                      max(sel_target['absorption_relative'], 1e-10))
+            P_off_capture = sep['P_qdot_capture'] * selectivity_penalty
+
+            # No-QDots residuales: minima captura
+            P_nonqdot_capture = sep['P_nonqdot_drag'] * 0.5  # Aun menos que en etapa 2
+
+            # 4. Aplicar separacion
+            collected_target = current_qdots_target * P_target_capture
+            collected_off = current_qdots_off * P_off_capture
+            collected_nonqdots = current_nonqdots * P_nonqdot_capture
+
+            waste_target = current_qdots_target - collected_target
+            waste_off = current_qdots_off - collected_off
+            waste_nonqdots = current_nonqdots - collected_nonqdots
+
+            # Total colectado
+            total_collected = collected_target + collected_off + collected_nonqdots
+            purity = collected_target / max(total_collected, 1e-10)
+            recovery = collected_target / max(n_qdots_in * 0.7, 1e-10)  # vs QDots objetivo iniciales
+            enrichment = purity / max(input_purity_target, 1e-10)
+
+            # 5. Actualizar sigma de distribucion (se estrecha con cada pasada)
+            # Cada pasada selectiva reduce sigma
+            sigma_reduction = 1.0 - (P_target_capture - P_off_capture)
+            current_sigma_nm = max(target_sigma, current_sigma_nm * sigma_reduction)
+
+            # 6. Actualizar energia
+            E_pass = self._calculate_energy_per_pass(power_mw, residence_time_s)
+            energy_state = self._update_energy_state(
+                energy_state, E_pass, fluid_volume_ml,
+                config.cooling_time_s, config.cooling_efficiency)
+
+            result = RecirculationPassResult(
+                pass_number=pass_num,
+                stage_type="QUALITY_REFINEMENT",
+                n_qdots_in=current_qdots_target + current_qdots_off,
+                n_nonqdots_in=current_nonqdots,
+                n_total_in=n_total,
+                n_qdots_collected=collected_target + collected_off,
+                n_nonqdots_collected=collected_nonqdots,
+                n_qdots_waste=waste_target + waste_off,
+                n_nonqdots_waste=waste_nonqdots,
+                purity=purity,
+                recovery=recovery,
+                enrichment_factor=enrichment,
+                energy_state=ChamberEnergyState(
+                    pass_number=energy_state.pass_number,
+                    T_fluid_K=energy_state.T_fluid_K,
+                    T_fluid_initial_K=energy_state.T_fluid_initial_K,
+                    dT_accumulated_K=energy_state.dT_accumulated_K,
+                    energy_deposited_J=energy_state.energy_deposited_J,
+                    viscosity_Pa_s=energy_state.viscosity_Pa_s,
+                    D_brownian_factor=energy_state.D_brownian_factor,
+                    soret_factor=energy_state.soret_factor,
+                ),
+                laser_power_applied_mw=power_mw,
+                separation_efficiency=P_target_capture,
+            )
+            results.append(result)
+
+            # Recircular
+            current_qdots_target = collected_target
+            current_qdots_off = collected_off
+            current_nonqdots = collected_nonqdots
+
+            if purity >= config.target_purity:
+                break
+
+        return results
+
+    # ===========================================================================
+    #  EJECUCION COMPLETA DEL SISTEMA MULTI-ETAPA
+    # ===========================================================================
+
+    def run_full_system(self,
+                        n_total_particles: float = 10000.0,
+                        qdot_fraction: float = 0.05,
+                        size_in_range_fraction: float = 0.15,
+                        prefilter_config: RecirculationStageConfig = None,
+                        separation_config: RecirculationStageConfig = None,
+                        refinement_config: RecirculationStageConfig = None
+                        ) -> MultiStageOutput:
+        """
+        Ejecuta el sistema completo de 3 etapas.
+
+        Parametros:
+          n_total_particles: Numero total de particulas del reactor
+          qdot_fraction: Fraccion que son QDots reales (~5%)
+          size_in_range_fraction: Fraccion en el rango de tamano correcto (~15%)
+          prefilter_config: Config de pre-filtrado (o None para defaults)
+          separation_config: Config de separacion QDot (o None para defaults)
+          refinement_config: Config de refinamiento (o None para defaults)
+        """
+        # Configuraciones por defecto
+        if prefilter_config is None:
+            prefilter_config = RecirculationStageConfig(
+                stage_type=RecirculationStageType.SIZE_PREFILTER,
+                n_passes=1,
+                size_cutoff_low_nm=1.0,
+                size_cutoff_high_nm=6.0,
+                prefilter_efficiency=0.95,
+            )
+
+        if separation_config is None:
+            separation_config = RecirculationStageConfig(
+                stage_type=RecirculationStageType.QDOT_SEPARATION,
+                n_passes=8,
+                initial_laser_power_mw=self.base_params.laser_power_mw,
+                power_adjustment_strategy="adaptive",
+                min_power_mw=50.0,
+                max_power_mw=1000.0,
+                cooling_time_s=5.0,
+                cooling_efficiency=0.7,
+                target_wavelength_nm=405.0,
+                target_purity=0.95,
+            )
+
+        if refinement_config is None:
+            refinement_config = RecirculationStageConfig(
+                stage_type=RecirculationStageType.QUALITY_REFINEMENT,
+                n_passes=5,
+                initial_laser_power_mw=self.base_params.laser_power_mw * 0.5,
+                power_adjustment_strategy="adaptive",
+                min_power_mw=30.0,
+                max_power_mw=500.0,
+                cooling_time_s=8.0,
+                cooling_efficiency=0.8,
+                target_wavelength_nm=405.0,
+                target_purity=0.99,
+                target_size_center_nm=3.0,
+                target_size_tolerance_nm=0.5,
+            )
+
+        all_stages = []
+        total_time = 0.0
+        total_energy = 0.0
+        total_passes = 0
+
+        # ==================== ETAPA 1: PRE-FILTRADO ====================
+        prefilter_results = self.run_size_prefilter(
+            prefilter_config, n_total_particles, qdot_fraction, size_in_range_fraction)
+        all_stages.append({
+            'stage_name': 'PRE-FILTRADO POR TAMANO',
+            'stage_type': 'SIZE_PREFILTER',
+            'config': prefilter_config,
+            'passes': prefilter_results,
+        })
+        total_passes += len(prefilter_results)
+
+        # Salida del pre-filtro -> entrada de separacion
+        pf_last = prefilter_results[-1]
+        n_qdots_after_pf = pf_last.n_qdots_collected
+        n_nonqdots_after_pf = pf_last.n_nonqdots_collected
+
+        # ==================== ETAPA 2: SEPARACION QDot ====================
+        separation_results = self.run_qdot_separation(
+            separation_config, n_qdots_after_pf, n_nonqdots_after_pf)
+        all_stages.append({
+            'stage_name': 'SEPARACION QDot vs NO-QDot',
+            'stage_type': 'QDOT_SEPARATION',
+            'config': separation_config,
+            'passes': separation_results,
+        })
+        total_passes += len(separation_results)
+
+        # Acumular energia y tiempo de etapa 2
+        if separation_results:
+            last_sep = separation_results[-1]
+            total_energy += last_sep.energy_state.energy_deposited_J
+            sep_energy_state = last_sep.energy_state
+            n_qdots_after_sep = last_sep.n_qdots_collected
+            n_nonqdots_after_sep = last_sep.n_nonqdots_collected
+        else:
+            sep_energy_state = ChamberEnergyState()
+            n_qdots_after_sep = n_qdots_after_pf
+            n_nonqdots_after_sep = n_nonqdots_after_pf
+
+        # ==================== ETAPA 3: REFINAMIENTO ====================
+        refinement_results = self.run_quality_refinement(
+            refinement_config, n_qdots_after_sep, n_nonqdots_after_sep,
+            sep_energy_state)
+        all_stages.append({
+            'stage_name': 'REFINAMIENTO DE CALIDAD',
+            'stage_type': 'QUALITY_REFINEMENT',
+            'config': refinement_config,
+            'passes': refinement_results,
+        })
+        total_passes += len(refinement_results)
+
+        if refinement_results:
+            last_ref = refinement_results[-1]
+            total_energy += last_ref.energy_state.energy_deposited_J - sep_energy_state.energy_deposited_J
+        else:
+            last_ref = separation_results[-1] if separation_results else prefilter_results[-1]
+
+        # ==================== METRICAS FINALES ====================
+        final_purity = last_ref.purity
+        final_qdots = last_ref.n_qdots_collected
+        initial_qdots = n_total_particles * qdot_fraction
+        final_recovery = final_qdots / max(initial_qdots, 1e-10)
+        initial_purity = qdot_fraction
+        total_enrichment = final_purity / max(initial_purity, 1e-10)
+
+        # Tiempo total estimado
+        geometry = self._base_designer.calculate_zone_geometry()
+        t_per_pass = geometry['residence_time_s']
+        total_time = total_passes * t_per_pass
+        # Agregar tiempos de enfriamiento
+        total_time += len(separation_results) * separation_config.cooling_time_s
+        total_time += len(refinement_results) * refinement_config.cooling_time_s
+
+        # Puntuacion de calidad
+        quality_score = self._calculate_quality_score(
+            final_purity, final_recovery, total_enrichment,
+            total_energy, total_time, total_passes)
+
+        self.output = MultiStageOutput(
+            stages=all_stages,
+            final_purity=final_purity,
+            final_recovery=final_recovery,
+            total_enrichment=total_enrichment,
+            total_passes=total_passes,
+            total_energy_J=total_energy,
+            total_time_s=total_time,
+            size_distribution_center_nm=refinement_config.target_size_center_nm,
+            size_distribution_sigma_nm=refinement_config.target_size_tolerance_nm / 3.0,
+            quality_score=quality_score,
+        )
+
+        return self.output
+
+    def _calculate_quality_score(self, purity: float, recovery: float,
+                                  enrichment: float, energy_J: float,
+                                  time_s: float, n_passes: int) -> float:
+        """Calcula puntuacion global de calidad del proceso (0-100)"""
+        score = 0.0
+
+        # Pureza (40 puntos max)
+        score += min(40.0, purity * 40.0)
+
+        # Recuperacion (25 puntos max)
+        score += min(25.0, recovery * 25.0)
+
+        # Enriquecimiento (15 puntos max)
+        if enrichment > 20:
+            score += 15.0
+        elif enrichment > 10:
+            score += 10.0 + 5.0 * (enrichment - 10.0) / 10.0
+        else:
+            score += enrichment * 1.0
+
+        # Eficiencia energetica (10 puntos max)
+        # Penalizar si se usa demasiada energia
+        E_per_pass = energy_J / max(n_passes, 1)
+        if E_per_pass < 0.01:
+            score += 10.0
+        elif E_per_pass < 0.1:
+            score += 7.0
+        elif E_per_pass < 1.0:
+            score += 4.0
+        else:
+            score += 1.0
+
+        # Eficiencia temporal (10 puntos max)
+        time_min = time_s / 60.0
+        if time_min < 10:
+            score += 10.0
+        elif time_min < 30:
+            score += 7.0
+        elif time_min < 60:
+            score += 4.0
+        else:
+            score += 1.0
+
+        return min(100.0, max(0.0, score))
+
+    # ===========================================================================
+    #  REPORTE
+    # ===========================================================================
+
+    def print_recirculation_report(self):
+        """Imprime reporte completo del sistema de recirculacion multi-etapa"""
+        o = self.output
+
+        print("\n" + "=" * 90)
+        print("  SISTEMA DE RECIRCULACION MULTI-ETAPA PARA CLASIFICACION DE CQDs")
+        print("  Separacion maxima calidad: Pre-filtro -> N separaciones -> M refinamientos")
+        print("=" * 90)
+
+        for stage_data in o.stages:
+            stage_name = stage_data['stage_name']
+            passes = stage_data['passes']
+
+            print(f"\n{'=' * 90}")
+            print(f"  ETAPA: {stage_name}")
+            print(f"  Pasadas: {len(passes)}")
+            print(f"{'=' * 90}")
+
+            # Cabecera de tabla
+            if stage_data['stage_type'] == 'SIZE_PREFILTER':
+                print(f"\n  {'Pass':<6} {'QDots_in':<12} {'NonQD_in':<12} "
+                      f"{'QDots_out':<12} {'NonQD_out':<12} {'Pureza':<10} {'Recup':<10}")
+                print(f"  {'-'*72}")
+                for r in passes:
+                    print(f"  {r.pass_number:<6} {r.n_qdots_in:<12.1f} "
+                          f"{r.n_nonqdots_in:<12.1f} "
+                          f"{r.n_qdots_collected:<12.1f} "
+                          f"{r.n_nonqdots_collected:<12.1f} "
+                          f"{r.purity*100:<9.1f}% {r.recovery*100:<9.1f}%")
+
+            else:
+                print(f"\n  {'Pass':<6} {'P_laser':<10} {'QDots_in':<10} "
+                      f"{'NonQD_in':<10} {'QDots_col':<10} {'NonQD_col':<10} "
+                      f"{'Pureza':<9} {'Recup':<9} {'dT_acum':<9} {'S_T_fac':<8}")
+                print(f"  {'-'*92}")
+                for r in passes:
+                    print(f"  {r.pass_number:<6} "
+                          f"{r.laser_power_applied_mw:<9.0f}W "
+                          f"{r.n_qdots_in:<10.1f} "
+                          f"{r.n_nonqdots_in:<10.1f} "
+                          f"{r.n_qdots_collected:<10.1f} "
+                          f"{r.n_nonqdots_collected:<10.1f} "
+                          f"{r.purity*100:<8.1f}% "
+                          f"{r.recovery*100:<8.1f}% "
+                          f"{r.energy_state.dT_accumulated_K:<8.2f}K "
+                          f"{r.energy_state.soret_factor:<7.3f}")
+
+        # Resumen final
+        print(f"\n{'=' * 90}")
+        print(f"  RESUMEN FINAL DEL PROCESO MULTI-ETAPA")
+        print(f"{'=' * 90}")
+        print(f"  Pasadas totales:          {o.total_passes}")
+        print(f"  Tiempo total:             {o.total_time_s:.0f} s ({o.total_time_s/60:.1f} min)")
+        print(f"  Energia total:            {o.total_energy_J:.4f} J ({o.total_energy_J*1e3:.2f} mJ)")
+        print(f"  Pureza final:             {o.final_purity*100:.2f}%")
+        print(f"  Recuperacion final:       {o.final_recovery*100:.2f}%")
+        print(f"  Factor enriquecimiento:   {o.total_enrichment:.1f}x")
+        print(f"  Tamano centro:            {o.size_distribution_center_nm:.1f} nm")
+        print(f"  Tamano sigma:             {o.size_distribution_sigma_nm:.2f} nm")
+        print(f"  PUNTUACION CALIDAD:       {o.quality_score:.0f}/100")
+
+        # Diagrama de flujo ASCII
+        self._print_flow_diagram()
+
+    def _print_flow_diagram(self):
+        """Diagrama ASCII del flujo multi-etapa"""
+        o = self.output
+
+        print(f"\n{'=' * 90}")
+        print(f"  DIAGRAMA DE FLUJO DEL SISTEMA MULTI-ETAPA")
+        print(f"{'=' * 90}")
+        print()
+
+        # Etapa 1
+        pf = o.stages[0]['passes'][-1] if o.stages[0]['passes'] else None
+        sep_passes = o.stages[1]['passes'] if len(o.stages) > 1 else []
+        ref_passes = o.stages[2]['passes'] if len(o.stages) > 2 else []
+
+        print("  REACTOR  ─────────────────────────────────────────────────────────────────>")
+        print("     │")
+        print("     │  Fluido post-reactor (todas las particulas)")
+        print("     v")
+        print("  ╔══════════════════════════════════════╗")
+        print("  ║  ETAPA 1: PRE-FILTRO POR TAMANO     ║")
+        print("  ║  DLD / Membrana nanometrica          ║")
+        if pf:
+            print(f"  ║  Retiene: 1-6 nm (ef={pf.separation_efficiency*100:.0f}%)         ║")
+            print(f"  ║  Pureza: {pf.purity*100:.1f}% | Recup: {pf.recovery*100:.1f}%      ║")
+        print("  ╚══════════╤═══════════════════════════╝")
+        print("     │       │")
+        print("     │       └──> DESCARTE: particulas fuera de rango (>{:.0f}nm, <{:.0f}nm)".format(6, 1))
+        print("     v")
+        print("  ╔══════════════════════════════════════╗")
+        print("  ║  ETAPA 2: SEPARACION QDot vs NO-QDot║")
+        n_sep = len(sep_passes)
+        print(f"  ║  {n_sep} recirculaciones optotermicas     ║")
+        print("  ║                                      ║")
+        print("  ║   ┌──────────────────────┐           ║")
+        print("  ║   │ CAMARA OPTOTHERMICA   │<─┐       ║")
+        print("  ║   │ Laser + Sustrato Au   │  │       ║")
+        print("  ║   │ QDots absorben->sube  │  │ x{:<3}  ║".format(n_sep))
+        print("  ║   │ No-QDots->sedimentan  │  │       ║")
+        print("  ║   └──────────┬────────────┘  │       ║")
+        print("  ║              │  Recircular   │       ║")
+        print("  ║              └───────────────┘       ║")
+        if sep_passes:
+            last_sep = sep_passes[-1]
+            print(f"  ║  Pureza: {last_sep.purity*100:.1f}% | dT={last_sep.energy_state.dT_accumulated_K:.1f}K ║")
+        print("  ╚══════════╤═══════════════════════════╝")
+        print("     │       │")
+        print("     │       └──> DESCARTE: no-QDots y debris residual")
+        print("     v")
+        print("  ╔══════════════════════════════════════╗")
+        print("  ║  ETAPA 3: REFINAMIENTO DE CALIDAD   ║")
+        n_ref = len(ref_passes)
+        print(f"  ║  {n_ref} etapas de selectividad tamano   ║")
+        print("  ║                                      ║")
+        print("  ║   ┌──────────────────────┐           ║")
+        print("  ║   │ CAMARA SELECTIVA      │<─┐       ║")
+        print("  ║   │ Lambda optimizada     │  │       ║")
+        print("  ║   │ Potencia reducida     │  │ x{:<3}  ║".format(n_ref))
+        print("  ║   │ Selectividad tamano   │  │       ║")
+        print("  ║   └──────────┬────────────┘  │       ║")
+        print("  ║              │  Refinar      │       ║")
+        print("  ║              └───────────────┘       ║")
+        if ref_passes:
+            last_ref = ref_passes[-1]
+            print(f"  ║  Pureza: {last_ref.purity*100:.1f}% | dT={last_ref.energy_state.dT_accumulated_K:.1f}K ║")
+        print("  ╚══════════╤═══════════════════════════╝")
+        print("             │")
+        print("             v")
+        print("  ╔══════════════════════════════════════╗")
+        print(f"  ║  QDots ALTA CALIDAD                  ║")
+        print(f"  ║  Pureza: {o.final_purity*100:.1f}%                        ║")
+        print(f"  ║  Recuperacion: {o.final_recovery*100:.1f}%                 ║")
+        print(f"  ║  Enriquecimiento: {o.total_enrichment:.0f}x                  ║")
+        print(f"  ║  Calidad: {o.quality_score:.0f}/100                       ║")
+        print("  ╚══════════════════════════════════════╝")
+
+    def print_energy_evolution(self):
+        """Imprime la evolucion energetica a traves de todas las pasadas"""
+        o = self.output
+
+        print(f"\n{'=' * 90}")
+        print(f"  EVOLUCION ENERGETICA DEL SISTEMA")
+        print(f"  Acumulacion de energia en camaras y ajuste dinamico de potencia")
+        print(f"{'=' * 90}")
+
+        all_passes = []
+        for stage_data in o.stages:
+            for p in stage_data['passes']:
+                all_passes.append((stage_data['stage_type'], p))
+
+        print(f"\n  {'#':<4} {'Etapa':<18} {'P_laser':<10} {'dT_acum':<10} "
+              f"{'mu/mu0':<8} {'D/D0':<8} {'S_T/S_T0':<9} {'E_total':<12} {'Pureza':<8}")
+        print(f"  {'-'*95}")
+
+        global_pass = 0
+        for stage_type, r in all_passes:
+            global_pass += 1
+            es = r.energy_state
+            mu_ratio = es.viscosity_Pa_s / VISCOSITY_WATER if VISCOSITY_WATER > 0 else 1.0
+            stage_short = {'SIZE_PREFILTER': 'Pre-filtro',
+                           'QDOT_SEPARATION': 'Separacion',
+                           'QUALITY_REFINEMENT': 'Refinamiento'}.get(stage_type, stage_type)
+
+            print(f"  {global_pass:<4} {stage_short:<18} "
+                  f"{r.laser_power_applied_mw:<9.0f}W "
+                  f"{es.dT_accumulated_K:<9.2f}K "
+                  f"{mu_ratio:<8.4f} "
+                  f"{es.D_brownian_factor:<8.3f} "
+                  f"{es.soret_factor:<9.3f} "
+                  f"{es.energy_deposited_J*1e3:<11.2f}mJ "
+                  f"{r.purity*100:<7.1f}%")
+
+        print(f"\n  Notas:")
+        print(f"    mu/mu0:   Viscosidad relativa (baja con T -> facilita difusion)")
+        print(f"    D/D0:     Difusion browniana relativa (sube con T -> compite con separacion)")
+        print(f"    S_T/S_T0: Coeficiente Soret relativo (baja con T -> menos termoforesis)")
+        print(f"    Estrategia adaptativa compensa estos cambios ajustando potencia laser")
+
+
+# ===============================================================================
 #  PROGRAMA PRINCIPAL
 # ===============================================================================
 
@@ -1821,6 +2932,15 @@ if __name__ == "__main__":
                         help="Ejecutar optimizacion por busqueda aleatoria")
     parser.add_argument("--compare", action="store_true",
                         help="Comparar los 3 modos de excitacion lado a lado")
+    parser.add_argument("--recirculation", action="store_true",
+                        help="Ejecutar sistema multi-etapa con recirculacion")
+    parser.add_argument("--sep-passes", type=int, default=8,
+                        help="Pasadas de separacion QDot (default: 8)")
+    parser.add_argument("--ref-passes", type=int, default=5,
+                        help="Pasadas de refinamiento de calidad (default: 5)")
+    parser.add_argument("--power-strategy", type=str, default="adaptive",
+                        choices=["fixed", "linear_decay", "adaptive"],
+                        help="Estrategia de ajuste de potencia (default: adaptive)")
     parser.add_argument("--mode", type=str, default="optothermal",
                         choices=["led", "laser", "optothermal"],
                         help="Modo de excitacion: led, laser, optothermal (default)")
@@ -1841,7 +2961,42 @@ if __name__ == "__main__":
     print("  Separacion selectiva: LED / Laser directo / Opto-termico")
     print("=" * 80)
 
-    if args.compare:
+    if args.recirculation:
+        print(f"\n-> Sistema multi-etapa con recirculacion")
+        print(f"   Separacion: {args.sep_passes} pasadas | Refinamiento: {args.ref_passes} pasadas")
+        print(f"   Estrategia de potencia: {args.power_strategy}\n")
+
+        params = ClassifierParameters(excitation_mode=ExcitationMode.OPTOTHERMAL)
+        system = MultiStageRecirculationSystem(params)
+
+        sep_config = RecirculationStageConfig(
+            stage_type=RecirculationStageType.QDOT_SEPARATION,
+            n_passes=args.sep_passes,
+            initial_laser_power_mw=params.laser_power_mw,
+            power_adjustment_strategy=args.power_strategy,
+            target_purity=0.95,
+        )
+        ref_config = RecirculationStageConfig(
+            stage_type=RecirculationStageType.QUALITY_REFINEMENT,
+            n_passes=args.ref_passes,
+            initial_laser_power_mw=params.laser_power_mw * 0.5,
+            power_adjustment_strategy=args.power_strategy,
+            target_purity=0.99,
+            target_size_center_nm=3.0,
+            target_size_tolerance_nm=0.5,
+        )
+
+        system.run_full_system(
+            n_total_particles=10000,
+            qdot_fraction=0.05,
+            size_in_range_fraction=0.15,
+            separation_config=sep_config,
+            refinement_config=ref_config,
+        )
+        system.print_recirculation_report()
+        system.print_energy_evolution()
+
+    elif args.compare:
         ClassifierDesigner.compare_modes()
 
     elif args.optimize:
@@ -1892,5 +3047,8 @@ if __name__ == "__main__":
     print("       python classifier_design.py --design --mode laser")
     print("       python classifier_design.py --compare")
     print("       python classifier_design.py --optimize --mode optothermal")
+    print("       python classifier_design.py --recirculation")
+    print("       python classifier_design.py --recirculation --sep-passes 10 --ref-passes 8")
+    print("       python classifier_design.py --recirculation --power-strategy adaptive")
     print("       python classifier_design.py --export-cad classifier_cad.json")
     print("=" * 80)
