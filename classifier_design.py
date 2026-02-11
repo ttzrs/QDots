@@ -2753,6 +2753,106 @@ class MultiStageRecirculationSystem:
         return results
 
     # ===========================================================================
+    #  ETAPA 2b: RECAPTURA DEL WASTE (CASCADA CONTRA-CORRIENTE)
+    # ===========================================================================
+
+    def run_waste_recapture(self, config: RecirculationStageConfig,
+                            waste_qdots: float, waste_nonqdots: float,
+                            n_rounds: int = 2,
+                            power_reduction: float = 0.6
+                            ) -> Tuple[List[Dict], float, float]:
+        """
+        Recaptura QDots del stream de waste mediante cascada contra-corriente.
+
+        Esquema fisico:
+          - El waste de la separacion principal contiene QDots perdidos (~4%/pase)
+          - Se enfria el waste (heat exchanger) para resetear estado termico
+          - Se reprocesa con potencia reducida (menos calor, mas pases)
+          - Los QDots recuperados se reincorporan al stream principal
+          - Se puede repetir N rondas (rendimientos decrecientes)
+
+        Es analogo a una columna de destilacion: cada ronda extrae mas producto
+        del residuo, pero con eficiencia decreciente.
+
+        Parametros:
+          config: Configuracion base (se modifica internamente)
+          waste_qdots: QDots en el waste acumulado
+          waste_nonqdots: No-QDots en el waste acumulado
+          n_rounds: Numero de rondas de recaptura (1-5)
+          power_reduction: Factor de potencia vs separacion principal (0.3-0.8)
+
+        Retorna:
+          (round_results, total_recovered_qdots, total_recovered_nonqdots)
+        """
+        p = self.base_params
+        round_results = []
+        total_recovered_qdots = 0.0
+        total_recovered_nonqdots = 0.0
+
+        remaining_waste_qdots = waste_qdots
+        remaining_waste_nonqdots = waste_nonqdots
+
+        for round_num in range(1, n_rounds + 1):
+            if remaining_waste_qdots < 1.0:
+                break
+
+            # Potencia decreciente con cada ronda (rendimientos marginales)
+            round_power_factor = power_reduction * (0.85 ** (round_num - 1))
+            round_power_mw = config.initial_laser_power_mw * round_power_factor
+
+            # Menos pases por ronda (waste es mas diluido, no vale la pena muchos)
+            round_passes = max(2, config.n_passes // 2)
+
+            # Crear config de recaptura: menos potencia, menos pases, mas enfriamiento
+            recapture_config = RecirculationStageConfig(
+                stage_type=RecirculationStageType.QDOT_SEPARATION,
+                n_passes=round_passes,
+                initial_laser_power_mw=round_power_mw,
+                power_adjustment_strategy=config.power_adjustment_strategy,
+                min_power_mw=config.min_power_mw,
+                max_power_mw=round_power_mw * 1.2,
+                cooling_time_s=config.cooling_time_s * 1.5,  # mas enfriamiento
+                cooling_efficiency=min(0.85, config.cooling_efficiency + 0.1),
+                target_wavelength_nm=config.target_wavelength_nm,
+                target_purity=0.80,  # objetivo mas bajo (es waste, concentracion baja)
+            )
+
+            # Ejecutar separacion sobre el waste
+            results = self.run_qdot_separation(
+                recapture_config, remaining_waste_qdots, remaining_waste_nonqdots)
+
+            if not results:
+                break
+
+            last = results[-1]
+            recovered_qdots = last.n_qdots_collected
+            recovered_nonqdots = last.n_nonqdots_collected
+
+            # Lo no capturado en esta ronda es waste para la siguiente
+            remaining_waste_qdots = last.n_qdots_waste
+            remaining_waste_nonqdots = last.n_nonqdots_waste
+
+            total_recovered_qdots += recovered_qdots
+            total_recovered_nonqdots += recovered_nonqdots
+
+            round_results.append({
+                'round': round_num,
+                'passes': results,
+                'power_mw': round_power_mw,
+                'n_passes': round_passes,
+                'input_qdots': waste_qdots if round_num == 1 else round_results[-1]['waste_qdots'],
+                'input_nonqdots': waste_nonqdots if round_num == 1 else round_results[-1]['waste_nonqdots'],
+                'recovered_qdots': recovered_qdots,
+                'recovered_nonqdots': recovered_nonqdots,
+                'waste_qdots': remaining_waste_qdots,
+                'waste_nonqdots': remaining_waste_nonqdots,
+                'purity': recovered_qdots / max(recovered_qdots + recovered_nonqdots, 1e-10),
+                'round_recovery': recovered_qdots / max(waste_qdots, 1e-10),
+            })
+
+        return round_results, total_recovered_qdots, total_recovered_nonqdots
+
+    # ===========================================================================
     #  EJECUCION COMPLETA DEL SISTEMA MULTI-ETAPA
     # ===========================================================================
 
@@ -2762,10 +2862,11 @@ class MultiStageRecirculationSystem:
                         size_in_range_fraction: float = 0.15,
                         prefilter_config: RecirculationStageConfig = None,
                         separation_config: RecirculationStageConfig = None,
-                        refinement_config: RecirculationStageConfig = None
+                        refinement_config: RecirculationStageConfig = None,
+                        waste_recapture_rounds: int = 0,
                         ) -> MultiStageOutput:
         """
-        Ejecuta el sistema completo de 3 etapas.
+        Ejecuta el sistema completo de 3 etapas (+ recaptura opcional).
 
         Parametros:
           n_total_particles: Numero total de particulas del reactor
@@ -2774,6 +2875,7 @@ class MultiStageRecirculationSystem:
           prefilter_config: Config de pre-filtrado (o None para defaults)
           separation_config: Config de separacion QDot (o None para defaults)
           refinement_config: Config de refinamiento (o None para defaults)
+          waste_recapture_rounds: Rondas de recaptura del waste (0=desactivado)
         """
         # Configuraciones por defecto
         if prefilter_config is None:
@@ -2858,6 +2960,46 @@ class MultiStageRecirculationSystem:
             sep_energy_state = ChamberEnergyState()
             n_qdots_after_sep = n_qdots_after_pf
             n_nonqdots_after_sep = n_nonqdots_after_pf
+
+        # ==================== ETAPA 2b: RECAPTURA DEL WASTE ====================
+        waste_recapture_results = []
+        if waste_recapture_rounds > 0 and separation_results:
+            # Acumular waste de TODOS los pases de separacion
+            total_waste_qdots = sum(r.n_qdots_waste for r in separation_results)
+            total_waste_nonqdots = sum(r.n_nonqdots_waste for r in separation_results)
+
+            if total_waste_qdots > 1.0:
+                waste_recapture_results, recovered_qdots, recovered_nonqdots = \
+                    self.run_waste_recapture(
+                        separation_config,
+                        total_waste_qdots, total_waste_nonqdots,
+                        n_rounds=waste_recapture_rounds,
+                    )
+
+                # Merge QDots recuperados con el stream principal
+                n_qdots_after_sep += recovered_qdots
+                n_nonqdots_after_sep += recovered_nonqdots
+
+                # Registrar como etapa
+                all_waste_passes = []
+                for wr in waste_recapture_results:
+                    all_waste_passes.extend(wr['passes'])
+                all_stages.append({
+                    'stage_name': f'RECAPTURA WASTE ({waste_recapture_rounds} rondas)',
+                    'stage_type': 'WASTE_RECAPTURE',
+                    'config': separation_config,
+                    'passes': all_waste_passes,
+                    'rounds': waste_recapture_results,
+                    'total_waste_in_qdots': total_waste_qdots,
+                    'total_waste_in_nonqdots': total_waste_nonqdots,
+                    'recovered_qdots': recovered_qdots,
+                    'recovered_nonqdots': recovered_nonqdots,
+                })
+                total_passes += len(all_waste_passes)
+
+                # Energia adicional de recaptura
+                if all_waste_passes:
+                    total_energy += all_waste_passes[-1].energy_state.energy_deposited_J
 
         # ==================== INTER-STAGE COOLING ====================
         # Heat exchanger entre camaras: enfria el fluido antes del refinamiento
@@ -3021,6 +3163,28 @@ class MultiStageRecirculationSystem:
                           f"{r.n_nonqdots_collected:<12.1f} "
                           f"{r.purity*100:<9.1f}% {r.recovery*100:<9.1f}%")
 
+            elif stage_data['stage_type'] == 'WASTE_RECAPTURE':
+                # Resumen por rondas de recaptura
+                rounds = stage_data.get('rounds', [])
+                tw_q = stage_data.get('total_waste_in_qdots', 0)
+                tw_nq = stage_data.get('total_waste_in_nonqdots', 0)
+                rec_q = stage_data.get('recovered_qdots', 0)
+                rec_nq = stage_data.get('recovered_nonqdots', 0)
+                print(f"\n  Waste total entrada: {tw_q:.1f} QDots + {tw_nq:.1f} no-QDots")
+                print(f"  Recuperados:         {rec_q:.1f} QDots + {rec_nq:.1f} no-QDots")
+                print(f"  Tasa recaptura:      {rec_q/max(tw_q, 1e-10)*100:.1f}%")
+                print(f"  Pureza recapturado:  {rec_q/max(rec_q+rec_nq, 1e-10)*100:.1f}%")
+                print()
+                for wr in rounds:
+                    rn = wr['round']
+                    rq = wr['recovered_qdots']
+                    rnq = wr['recovered_nonqdots']
+                    rp = wr['purity']
+                    pw = wr['power_mw']
+                    n_p = wr['n_passes']
+                    print(f"  Ronda {rn}: {pw:.0f}mW x{n_p} pases -> "
+                          f"{rq:.1f} QDots recup ({rp*100:.1f}% pureza)")
+
             else:
                 print(f"\n  {'Pass':<6} {'P_laser':<10} {'QDots_in':<10} "
                       f"{'NonQD_in':<10} {'QDots_col':<10} {'NonQD_col':<10} "
@@ -3067,7 +3231,16 @@ class MultiStageRecirculationSystem:
         # Etapa 1
         pf = o.stages[0]['passes'][-1] if o.stages[0]['passes'] else None
         sep_passes = o.stages[1]['passes'] if len(o.stages) > 1 else []
-        ref_passes = o.stages[2]['passes'] if len(o.stages) > 2 else []
+
+        # Detectar etapa de recaptura y refinamiento (indices variables)
+        waste_stage = None
+        ref_stage_idx = 2
+        for i, st in enumerate(o.stages):
+            if st['stage_type'] == 'WASTE_RECAPTURE':
+                waste_stage = st
+            if st['stage_type'] == 'QUALITY_REFINEMENT':
+                ref_stage_idx = i
+        ref_passes = o.stages[ref_stage_idx]['passes'] if len(o.stages) > ref_stage_idx else []
 
         print("  REACTOR  ─────────────────────────────────────────────────────────────────>")
         print("     │")
@@ -3100,8 +3273,34 @@ class MultiStageRecirculationSystem:
             last_sep = sep_passes[-1]
             print(f"  ║  Pureza: {last_sep.purity*100:.1f}% | dT={last_sep.energy_state.dT_accumulated_K:.1f}K ║")
         print("  ╚══════════╤═══════════════════════════╝")
-        print("     │       │")
-        print("     │       └──> DESCARTE: no-QDots y debris residual")
+
+        # Waste recapture branch (si existe)
+        if waste_stage:
+            rec_q = waste_stage.get('recovered_qdots', 0)
+            rec_nq = waste_stage.get('recovered_nonqdots', 0)
+            tw_q = waste_stage.get('total_waste_in_qdots', 0)
+            n_rounds = len(waste_stage.get('rounds', []))
+            recapture_rate = rec_q / max(tw_q, 1e-10) * 100
+
+            print("     │       │")
+            print("     │       └──> WASTE ──────────────────────────────────┐")
+            print("     │                                                    │")
+            print("     │           ╔════════════════════════════════════╗    │")
+            print("     │           ║  ETAPA 2b: RECAPTURA WASTE        ║    │")
+            print(f"     │           ║  {n_rounds} rondas cascada contra-corriente ║<───┘")
+            print("     │           ║                                    ║")
+            print("     │           ║   WASTE ──> [COOLING] ──> [LASER] ║")
+            print("     │           ║   Potencia reducida, T reseteada  ║")
+            print(f"     │           ║   Recaptura: {recapture_rate:.0f}% QDots del waste  ║")
+            print(f"     │           ║   +{rec_q:.0f} QDots recuperados            ║")
+            print("     │           ╚══════════╤═════════════════════════╝")
+            print("     │                      │")
+            print("     │<─────────────────────┘  (merge con stream principal)")
+            print("     │")
+        else:
+            print("     │       │")
+            print("     │       └──> DESCARTE: no-QDots y debris residual")
+
         print("     v")
         print("  ╔══════════════════════════════════════╗")
         print("  ║  ETAPA 3: REFINAMIENTO DE CALIDAD   ║")
@@ -3440,6 +3639,8 @@ if __name__ == "__main__":
                         help="Solvente del fluido (default: water)")
     parser.add_argument("--microchannel-uL", type=float, default=None,
                         help="Volumen de microcanal por zona en uL (default: None = macro)")
+    parser.add_argument("--waste-recapture", type=int, default=0, metavar="ROUNDS",
+                        help="Rondas de recaptura del waste (0=desactivado, 1-5 rondas)")
     parser.add_argument("--mode", type=str, default="optothermal",
                         choices=["led", "laser", "optothermal"],
                         help="Modo de excitacion: led, laser, optothermal (default)")
@@ -3502,12 +3703,16 @@ if __name__ == "__main__":
             target_size_tolerance_nm=0.5,
         )
 
+        if args.waste_recapture > 0:
+            print(f"   Recaptura waste: {args.waste_recapture} rondas\n")
+
         system.run_full_system(
             n_total_particles=10000,
             qdot_fraction=0.05,
             size_in_range_fraction=0.15,
             separation_config=sep_config,
             refinement_config=ref_config,
+            waste_recapture_rounds=args.waste_recapture,
         )
         system.print_recirculation_report()
         system.print_energy_evolution()
