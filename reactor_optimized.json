@@ -37,41 +37,60 @@
     "power_w": 9.2664
   },
   "classifier": {
-    "n_stages": 5,
-    "channel_width": 2.0,
-    "channel_height": 1.0,
+    "type": "optical_buoyancy",
+    "n_zones": 3,
+    "zone_length": 40.0,
+    "zone_height": 15.0,
+    "zone_width": 10.0,
+    "channel_height": 2.0,
     "wall_thickness": 2.0,
-    "stage_pitch": 25.0,
-    "membrane_diameter": 13.0,
-    "membrane_seat_depth": 0.5,
-    "membranes": [
-      {"stage": 0, "pore_nm": 10000, "type": "track_etched", "material": "polycarbonate"},
-      {"stage": 1, "pore_nm": 5000, "type": "track_etched", "material": "polycarbonate"},
-      {"stage": 2, "pore_nm": 20, "type": "anodic_alumina", "material": "alumina"},
-      {"stage": 3, "pore_nm": 13, "type": "anodic_alumina", "material": "alumina"},
-      {"stage": 4, "pore_nm": 3, "type": "ultrafiltration", "material": "ceramic"}
-    ],
-    "chambers": {
-      "width": 10.0,
-      "length": 15.0,
-      "depth": 5.0
+    "barriers": {
+      "pore_diameter_um": 50.0,
+      "material": "mesh_steel"
     },
-    "optics": {
-      "window_diameter": 8.0,
-      "window_thickness": 1.0,
-      "led_type": "blue_led_405",
-      "led_diameter": 5.0,
-      "detector_diameter": 5.0
+    "zones": [
+      {
+        "zone": 1,
+        "led_wavelength_nm": 520,
+        "led_power_mw": 200,
+        "led_count": 4,
+        "target_size_range_nm": [3.5, 5.0],
+        "target_emission_range_nm": [550, 700],
+        "expected_content": "qdots_rojos"
+      },
+      {
+        "zone": 2,
+        "led_wavelength_nm": 405,
+        "led_power_mw": 200,
+        "led_count": 4,
+        "target_size_range_nm": [2.5, 3.5],
+        "target_emission_range_nm": [450, 550],
+        "expected_content": "qdots_azules"
+      },
+      {
+        "zone": 3,
+        "led_wavelength_nm": 365,
+        "led_power_mw": 200,
+        "led_count": 4,
+        "target_size_range_nm": [1.5, 2.5],
+        "target_emission_range_nm": [350, 450],
+        "expected_content": "qdots_uv"
+      }
+    ],
+    "collection_ports": {
+      "top_diameter_mm": 2.0,
+      "bottom_diameter_mm": 2.0
     },
     "connections": {
       "inlet_diameter": 2.0,
-      "outlet_diameter": 1.5,
+      "outlet_diameter": 2.0,
       "waste_diameter": 2.0
     },
+    "flow_rate_ml_min": 2.0,
     "performance": {
       "estimated_recovery": 0.0,
       "estimated_purity": 0.0,
-      "total_pressure_drop_bar": 0.0
+      "note": "Forces are sub-fN for 2-5nm particles; Brownian diffusion dominates"
     }
   }
 }

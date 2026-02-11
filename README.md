@@ -9,11 +9,11 @@ El sistema convierte materia orgánica residual (purines) en nanomateriales fluo
 La clave es que **ningún parámetro se elige por ensayo y error**: cada decisión de diseño (geometría del canal, voltaje, tiempo de residencia, setpoint del sensor) se deriva de simulaciones cuánticas (VQE) y fluidodinámicas (CFD) previas.
 
 ```
-Purín → [Pre-tratamiento] → [Reactor DBD] → [Clasificador Laberinto] → Producto
+Purín → [Pre-tratamiento] → [Reactor DBD] → [Clasificador Óptico] → Producto
                                     ↑              │                       ↑
-                              Gemelo Digital   5 etapas membrana    Discriminación PL
-                           (Tangelo + OpenFOAM)    ↓                  (UV LED 405nm)
-                                              Tamaño → Fluorescencia → QDots puros
+                              Gemelo Digital   3 zonas LED          Flotabilidad óptica
+                           (Tangelo + OpenFOAM)    ↓               (fotoforesis/fototérmica)
+                                         Excitación λ → QDots suben → Colección arriba
 ```
 
 ## Arquitectura
@@ -67,37 +67,41 @@ openfoam_reactor/
 └── run_openfoam.sh
 ```
 
-### 4. Clasificador de Laberinto (Post-reactor)
+### 4. Clasificador por Flotabilidad Óptica (Post-reactor)
 
-Sistema de separación en dos etapas: clasificación por tamaño mediante membranas en cascada, seguida de discriminación por fotoluminiscencia para aislar QDots de partículas no-fluorescentes.
+Separación selectiva de QDots por excitación con LED. Cada zona tiene un array de LEDs a una longitud de onda específica. Los QDots que absorben esa λ experimentan fuerza fototérmica/fotofórica y suben al puerto de colección superior. Las partículas no-QDot no absorben y sedimentan al puerto inferior.
 
 ```
-Reactor → [10μm] → [5μm] → [20nm AAO] → [13nm AAO] → [3nm UF] → Residuo
-            ↓         ↓         ↓              ↓            ↓
-         Debris    Agregados  QDots rojos  QDots azules  QDots UV
-                               ↓ UV LED      ↓ UV LED     ↓ UV LED
-                              ¿Fluoresce?   ¿Fluoresce?  ¿Fluoresce?
-                              Sí→Producto   Sí→PRODUCTO  Sí→Producto
-                              No→Descarte   No→Descarte  No→Descarte
+         LED 520nm        LED 405nm        LED 365nm
+           ↓↓↓↓              ↓↓↓↓              ↓↓↓↓
+  ┌───────────────────┬───────────────────┬───────────────────┐
+  │  ↑ QDots rojos    │  ↑ QDots azules   │  ↑ QDots UV      │  ← Colección ARRIBA
+IN→ ║  Zona 1        barrera  Zona 2     barrera  Zona 3    → WASTE
+  │  ↓ sedimentan     │  ↓ sedimentan     │  ↓ sedimentan    │  ← Colección ABAJO
+  └───────────────────┴───────────────────┴───────────────────┘     (debris)
+
+  Barreras: malla ~50 μm (sin caída de presión)
 ```
 
 | Script | Descripción |
 |--------|-------------|
-| `classifier_design.py` | Diseño paramétrico del laberinto (membranas, PL, eficiencia) |
-| `classifier_3d_cadquery.py` | Modelo 3D CadQuery (cuerpo + tapa removible) |
+| `classifier_design.py` | Diseño paramétrico (fuerzas ópticas, fototérmica, eficiencia) |
+| `classifier_3d_cadquery.py` | Modelo 3D CadQuery (zonas + LEDs + puertos) |
 | `classifier_3d.scad` | Modelo 3D OpenSCAD con visualización |
 
 **Especificaciones del clasificador:**
-- 5 etapas: Nuclepore 10μm/5μm + Anodisc AAO 20nm/13nm + UF cerámica 3nm
-- Cámaras con ventana de cuarzo + LED UV 405nm + fotodetector a 90°
-- Tapa removible con tornillos M3 para cambio de membranas
-- Recuperación estimada: **~80%**, Pureza: **~99%**
+- 3 zonas: LED 520nm (verde) / 405nm (UV-azul) / 365nm (UV)
+- Array de 4 LEDs por zona (200 mW cada uno) en la parte superior
+- Barreras de malla ~50 μm entre zonas (sin caída de presión)
+- Puertos de colección arriba (QDots) y abajo (debris) por zona
+- Ventanas laterales de observación
+- **Nota**: Las fuerzas fototérmicas sobre nanopartículas de 2-5 nm son del orden de fN; la difusión browniana es el desafío principal
 
 ### 5. Control y Operación
 
 | Script | Descripción |
 |--------|-------------|
-| `reactor_control.py` | Control del reactor + clasificador (ReactorController + ClassifierController) |
+| `reactor_control.py` | Control del reactor + clasificador óptico (ReactorController + ClassifierController) |
 | `qdot_final.py` | Integración completa del sistema |
 
 ## Uso
@@ -112,7 +116,7 @@ python qdot_vqe.py
 # Optimizar diseño del reactor
 python reactor_design.py --optimize --production-target 100
 
-# Diseñar clasificador de laberinto
+# Diseñar clasificador por flotabilidad óptica
 python classifier_design.py --design
 python classifier_design.py --optimize
 python classifier_design.py --export-cad classifier_params.json
@@ -146,7 +150,7 @@ docker compose -f docker-compose.gpu.yml up
 | Simulación VQE | Completada | Validar con clústeres de 24+ qubits en GPU |
 | Diseño CAD reactor | Optimizado | Imprimir en resina de alta temperatura |
 | Simulación CFD | Validada | Verificar con fluidos no-newtonianos |
-| Clasificador laberinto | Diseñado | Integrar CFD del clasificador, imprimir prototipo |
+| Clasificador óptico | Diseñado | Evaluar viabilidad de fuerzas fototérmicas en nanopartículas 2-5nm |
 | Lógica de control | Implementada | Conectar a actuadores físicos (reactor + clasificador) |
 | Hardware | Pendiente | Fabricar reactor + clasificador e integrar electrónica |
 

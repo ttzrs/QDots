@@ -278,247 +278,215 @@ class ReactorController:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  CLASIFICADOR DE LABERINTO (POST-REACTOR)
+#  CLASIFICADOR POR FLOTABILIDAD OPTICA (POST-REACTOR)
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Configuración por defecto de membranas (poro en nm)
-DEFAULT_PORE_SIZES_NM = [10000, 5000, 20, 13, 3]
-
-# Rango de tamaño de QDot capturado por etapa (nm)
-# Etapas 1-2: debris/agregados (sin QDots)
-# Etapa 3: poro 20nm captura partículas 3.5-5.0 nm (QDots rojos/amarillos)
-# Etapa 4: poro 13nm captura partículas 2.5-3.5 nm (QDots azules/verdes)
-# Etapa 5: poro 3nm captura partículas 1.5-2.5 nm (QDots UV)
-STAGE_QDOT_RANGES_NM = [
-    None,               # Etapa 1: debris
-    None,               # Etapa 2: agregados
-    (3.5, 5.0),         # Etapa 3: QDots rojos/amarillos
-    (2.5, 3.5),         # Etapa 4: QDots azules/verdes (OBJETIVO)
-    (1.5, 2.5),         # Etapa 5: QDots UV
-]
-
-# Nombres de etapas
-STAGE_NAMES = [
-    "Filtrado grueso (debris >10μm)",
-    "Filtrado medio (agregados >5μm)",
-    "QDots grandes (rojos/amarillos 3.5-5 nm)",
-    "QDots objetivo (azules/verdes 2.5-3.5 nm)",
-    "QDots ultrapequeños (UV <2.5 nm)",
+# Configuracion por defecto de zonas
+DEFAULT_ZONE_CONFIG = [
+    {
+        'zone': 0,
+        'name': 'QDots rojos (3.5-5.0 nm)',
+        'led_wavelength_nm': 520,
+        'led_power_mw': 200,
+        'size_range_nm': (3.5, 5.0),
+        'emission_range_nm': (550, 700),
+    },
+    {
+        'zone': 1,
+        'name': 'QDots azules (2.5-3.5 nm)',
+        'led_wavelength_nm': 405,
+        'led_power_mw': 200,
+        'size_range_nm': (2.5, 3.5),
+        'emission_range_nm': (450, 550),
+    },
+    {
+        'zone': 2,
+        'name': 'QDots UV (1.5-2.5 nm)',
+        'led_wavelength_nm': 365,
+        'led_power_mw': 200,
+        'size_range_nm': (1.5, 2.5),
+        'emission_range_nm': (350, 450),
+    },
 ]
 
 
 class ClassifierController:
     """
-    Controlador del clasificador de laberinto post-reactor.
+    Controlador del clasificador por flotabilidad optica post-reactor.
 
-    Cada etapa tiene una membrana con tamaño de poro decreciente.
-    Las cámaras de colección con detección PL discriminan QDots
-    de partículas no-fluorescentes del mismo tamaño.
+    Cada zona tiene un array de LEDs a una longitud de onda especifica.
+    Los QDots que absorben esa lambda experimentan fuerza fotoforetica/
+    fototermica y suben al puerto de coleccion superior.
+    Las particulas no-QDot sedimentan al puerto inferior.
+
+    Sensores:
+      - Sensor ARRIBA: detecta fluorescencia de QDots que suben
+      - Sensor ABAJO: verifica ausencia de QDots (debris)
 
     Flujo:
-        Reactor → Etapa 1 (10μm) → Etapa 2 (5μm) → Etapa 3 (20nm)
-        → Etapa 4 (13nm) → Etapa 5 (3nm) → Residuo molecular
+        Reactor -> Zona 1 (LED 520nm) -> Zona 2 (LED 405nm) ->
+        Zona 3 (LED 365nm) -> Residuo
     """
 
     def __init__(
         self,
-        n_stages: int = 5,
-        pore_sizes_nm: list = None,
+        n_zones: int = 3,
+        zone_config: list = None,
         reactor_controller: 'ReactorController' = None,
         min_intensity: float = INTENSITY_THRESHOLD,
         quantum_yield: float = 0.4,
     ):
-        self.n_stages = n_stages
-        self.pore_sizes_nm = pore_sizes_nm or DEFAULT_PORE_SIZES_NM
+        self.n_zones = n_zones
+        self.zone_config = zone_config or DEFAULT_ZONE_CONFIG
         self.reactor_ctrl = reactor_controller or ReactorController()
         self.min_intensity = min_intensity
         self.quantum_yield = quantum_yield
 
-        # Construir especificaciones por etapa
-        self.stage_specs = self._build_stage_specs()
+        # Construir especificaciones por zona
+        self.zone_specs = self._build_zone_specs()
 
-        # Estado de válvulas por etapa
-        self.valve_states = [ValvePosition.WASTE] * n_stages
+        # Estado de puertos por zona: 'collecting' o 'idle'
+        self.top_port_states = ['idle'] * n_zones    # QDots
+        self.bottom_port_states = ['idle'] * n_zones  # Debris
+        self.led_powers = [zc.get('led_power_mw', 200) for zc in self.zone_config[:n_zones]]
 
-        # Historial por etapa
-        self.stage_histories = [[] for _ in range(n_stages)]
+        # Historial por zona
+        self.zone_histories = [[] for _ in range(n_zones)]
 
-    def _build_stage_specs(self) -> list:
+    def _build_zone_specs(self) -> list:
         """
-        Mapea cada etapa a rango de tamaños de QDot y longitudes de onda esperadas.
-        Usa el modelo E_gap = E_bulk + A/d² para predecir emisión.
-
-        Los poros de membrana filtran partículas grandes, pero los QDots de
-        interés (2-5 nm) son mucho menores que los poros de las primeras etapas.
-        Los rangos de QDot se definen en STAGE_QDOT_RANGES_NM.
+        Mapea cada zona a rango de tamanos de QDot y longitudes de onda esperadas.
+        Usa el modelo E_gap = E_bulk + A/d^2 para predecir emision.
         """
         specs = []
-        for i, pore_nm in enumerate(self.pore_sizes_nm):
-            qdot_range = STAGE_QDOT_RANGES_NM[i] if i < len(STAGE_QDOT_RANGES_NM) else None
-            is_qdot_stage = qdot_range is not None
-
-            if is_qdot_stage:
-                d_min, d_max = qdot_range
-                # Partícula más pequeña → gap más alto → λ más corta
-                lambda_short = EV_TO_NM / (E_BULK_EV + A_CONFINEMENT / d_min ** 2)
-                # Partícula más grande → gap más bajo → λ más larga
-                lambda_long = EV_TO_NM / (E_BULK_EV + A_CONFINEMENT / d_max ** 2)
-                expected_lambda = (lambda_short, lambda_long)
-            else:
-                d_min, d_max = 0, 0
-                expected_lambda = (0, 0)
+        for i, zc in enumerate(self.zone_config[:self.n_zones]):
+            d_min, d_max = zc['size_range_nm']
+            lambda_short = EV_TO_NM / (E_BULK_EV + A_CONFINEMENT / d_min ** 2)
+            lambda_long = EV_TO_NM / (E_BULK_EV + A_CONFINEMENT / d_max ** 2)
 
             specs.append({
-                'stage': i,
-                'name': STAGE_NAMES[i] if i < len(STAGE_NAMES) else f"Etapa {i+1}",
-                'pore_nm': pore_nm,
+                'zone': i,
+                'name': zc['name'],
+                'led_wavelength_nm': zc['led_wavelength_nm'],
+                'led_power_mw': zc.get('led_power_mw', 200),
                 'size_range_nm': (d_min, d_max),
-                'expected_lambda_range_nm': expected_lambda,
-                'is_qdot_stage': is_qdot_stage,
+                'expected_lambda_range_nm': (lambda_short, lambda_long),
+                'emission_range_nm': zc.get('emission_range_nm', (lambda_short, lambda_long)),
             })
 
         return specs
 
-    def process_stage_reading(
+    def process_zone_reading(
         self,
-        stage_index: int,
-        wavelength_nm: float,
-        intensity: float,
+        zone_index: int,
+        top_wavelength_nm: float,
+        top_intensity: float,
+        bottom_wavelength_nm: float = 0.0,
+        bottom_intensity: float = 0.0,
         fwhm_nm: float = 40.0,
     ) -> dict:
         """
-        Procesa lectura de fluorescencia de una cámara de colección.
+        Procesa lecturas de los sensores superior e inferior de una zona.
 
-        Lógica de decisión:
-        1. Etapa de filtrado grueso (poro >100nm) → siempre WASTE
-        2. Sin fluorescencia (intensidad baja) → WASTE (no son QDots)
-        3. Fluorescencia en rango esperado → PRODUCT
-        4. Fluorescencia fuera de rango → RECYCLE (mal clasificado)
+        Logica de decision:
+        1. Sensor arriba detecta fluorescencia en rango -> abrir puerto superior (QDots)
+        2. Sensor arriba sin fluorescencia -> zona vacia o QDots no excitados
+        3. Sensor abajo sin fluorescencia -> debris sedimentando (esperado)
+        4. Sensor abajo con fluorescencia -> QDots no capturados (ajustar LED)
         """
-        spec = self.stage_specs[stage_index]
+        spec = self.zone_specs[zone_index]
+        lambda_min, lambda_max = spec['emission_range_nm']
 
-        # Etapa de filtrado grueso: todo es debris
-        if not spec['is_qdot_stage']:
-            result = {
-                'stage': stage_index,
-                'stage_name': spec['name'],
-                'action': 'WASTE',
-                'valve': ValvePosition.WASTE.value,
-                'reason': f"Etapa {stage_index+1}: {spec['name']} → descarte",
-                'wavelength_nm': wavelength_nm,
-                'intensity': intensity,
-            }
-            self.valve_states[stage_index] = ValvePosition.WASTE
-            self.stage_histories[stage_index].append(result)
-            return result
+        # Calcular tamano estimado si hay fluorescencia arriba
+        size_nm = self.reactor_ctrl.wavelength_to_size(top_wavelength_nm) if top_intensity > 0 else 0
 
-        # Sin fluorescencia → no son QDots, misma tamaño pero no fluorescentes
-        if intensity < self.min_intensity:
-            result = {
-                'stage': stage_index,
-                'stage_name': spec['name'],
-                'action': 'WASTE',
-                'valve': ValvePosition.WASTE.value,
-                'reason': f"Etapa {stage_index+1}: sin fluorescencia (I={intensity:.2f}) → no son QDots",
-                'wavelength_nm': wavelength_nm,
-                'intensity': intensity,
-            }
-            self.valve_states[stage_index] = ValvePosition.WASTE
-            self.stage_histories[stage_index].append(result)
-            return result
-
-        # Fluorescencia detectada → verificar si λ coincide con lo esperado
-        lambda_min, lambda_max = spec['expected_lambda_range_nm']
-
-        # Calcular tamaño estimado
-        size_nm = self.reactor_ctrl.wavelength_to_size(wavelength_nm)
-
-        if lambda_min <= wavelength_nm <= lambda_max:
-            # Verificar calidad: FWHM debe ser razonable para monodispersidad
-            if fwhm_nm > FWHM_MAX_NM:
-                result = {
-                    'stage': stage_index,
-                    'stage_name': spec['name'],
-                    'action': 'WASTE',
-                    'valve': ValvePosition.WASTE.value,
-                    'reason': (f"Etapa {stage_index+1}: QDots detectados pero FWHM alto "
-                              f"({fwhm_nm:.0f}nm > {FWHM_MAX_NM}nm) → descarte"),
-                    'wavelength_nm': wavelength_nm,
-                    'intensity': intensity,
-                    'size_nm': size_nm,
-                }
+        # --- Sensor ARRIBA: detectar QDots excitados ---
+        if top_intensity >= self.min_intensity:
+            if lambda_min <= top_wavelength_nm <= lambda_max:
+                if fwhm_nm > FWHM_MAX_NM:
+                    top_action = 'WASTE'
+                    top_reason = (f"Zona {zone_index+1}: QDots detectados arriba pero FWHM alto "
+                                  f"({fwhm_nm:.0f}nm > {FWHM_MAX_NM}nm)")
+                else:
+                    top_action = 'COLLECT_TOP'
+                    top_reason = (f"Zona {zone_index+1}: QDots confirmados arriba "
+                                  f"lambda={top_wavelength_nm:.0f}nm, d={size_nm:.1f}nm")
             else:
-                reason = (f"Etapa {stage_index+1}: QDots confirmados "
-                         f"λ={wavelength_nm:.0f}nm, d={size_nm:.1f}nm → PRODUCTO")
-                result = {
-                    'stage': stage_index,
-                    'stage_name': spec['name'],
-                    'action': 'PRODUCT',
-                    'valve': ValvePosition.PRODUCT.value,
-                    'reason': reason,
-                    'wavelength_nm': wavelength_nm,
-                    'intensity': intensity,
-                    'size_nm': size_nm,
-                    'fwhm_nm': fwhm_nm,
-                }
+                top_action = 'RECYCLE'
+                top_reason = (f"Zona {zone_index+1}: fluorescencia arriba fuera de rango "
+                              f"({top_wavelength_nm:.0f}nm vs {lambda_min:.0f}-{lambda_max:.0f}nm)")
         else:
-            # Fluorescencia pero λ fuera del rango esperado → mal clasificado
-            result = {
-                'stage': stage_index,
-                'stage_name': spec['name'],
-                'action': 'RECYCLE',
-                'valve': ValvePosition.RECYCLE.value,
-                'reason': (f"Etapa {stage_index+1}: λ={wavelength_nm:.0f}nm fuera del rango "
-                          f"esperado ({lambda_min:.0f}-{lambda_max:.0f}nm) → recircular"),
-                'wavelength_nm': wavelength_nm,
-                'intensity': intensity,
-                'size_nm': size_nm,
-            }
+            top_action = 'IDLE'
+            top_reason = f"Zona {zone_index+1}: sin fluorescencia arriba (I={top_intensity:.2f})"
 
-        self.valve_states[stage_index] = ValvePosition[result['action']]
-        self.stage_histories[stage_index].append(result)
+        # --- Sensor ABAJO: verificar que no hay QDots ---
+        if bottom_intensity >= self.min_intensity:
+            bottom_action = 'ADJUST_LED'
+            bottom_reason = (f"Zona {zone_index+1}: fluorescencia detectada abajo "
+                             f"(I={bottom_intensity:.2f}) -> QDots no capturados, aumentar LED")
+            # Sugerir aumento de potencia
+            led_adjustment = min(1.5, 1.0 + bottom_intensity)
+        else:
+            bottom_action = 'COLLECT_BOTTOM'
+            bottom_reason = f"Zona {zone_index+1}: sin fluorescencia abajo -> debris sedimentado"
+            led_adjustment = 1.0
+
+        # Estado de puertos
+        self.top_port_states[zone_index] = 'collecting' if top_action == 'COLLECT_TOP' else 'idle'
+        self.bottom_port_states[zone_index] = 'collecting' if bottom_action == 'COLLECT_BOTTOM' else 'idle'
+
+        result = {
+            'zone': zone_index,
+            'zone_name': spec['name'],
+            'led_wavelength_nm': spec['led_wavelength_nm'],
+            'top_action': top_action,
+            'top_reason': top_reason,
+            'bottom_action': bottom_action,
+            'bottom_reason': bottom_reason,
+            'top_wavelength_nm': top_wavelength_nm,
+            'top_intensity': top_intensity,
+            'bottom_intensity': bottom_intensity,
+            'size_nm': size_nm,
+            'fwhm_nm': fwhm_nm,
+            'led_power_adjustment': led_adjustment,
+        }
+
+        self.zone_histories[zone_index].append(result)
         return result
 
-    def scan_all_stages(self, readings: list) -> list:
+    def scan_all_zones(self, readings: list) -> list:
         """
-        Procesa lecturas de todas las etapas simultáneamente.
+        Procesa lecturas de todas las zonas simultaneamente.
 
         Args:
-            readings: Lista de (wavelength, intensity, fwhm) por etapa.
+            readings: Lista de (top_wl, top_I, bottom_wl, bottom_I, fwhm) por zona.
         """
         results = []
-        for i, (wl, intensity, fwhm) in enumerate(readings):
-            result = self.process_stage_reading(i, wl, intensity, fwhm)
+        for i, reading in enumerate(readings):
+            top_wl, top_I, bottom_wl, bottom_I, fwhm = reading
+            result = self.process_zone_reading(i, top_wl, top_I, bottom_wl, bottom_I, fwhm)
             results.append(result)
         return results
 
     def print_classifier_status(self):
         """Imprime estado actual del clasificador"""
-        print("\n  ┌" + "─" * 66 + "┐")
-        print("  │  CLASIFICADOR DE LABERINTO - ESTADO DE ETAPAS" + " " * 18 + "│")
-        print("  ├" + "─" * 66 + "┤")
-        print(f"  │  {'Etapa':<8}{'Poro':<12}{'Tipo':<18}{'Rango λ (nm)':<16}{'Válvula':<12}│")
-        print("  ├" + "─" * 66 + "┤")
+        print("\n  +" + "-" * 76 + "+")
+        print("  |  CLASIFICADOR POR FLOTABILIDAD OPTICA - ESTADO DE ZONAS" + " " * 18 + "|")
+        print("  +" + "-" * 76 + "+")
+        print(f"  |  {'Zona':<6}{'LED (nm)':<10}{'Tipo':<28}{'Emision (nm)':<16}{'Arriba':<8}{'Abajo':<8}|")
+        print("  +" + "-" * 76 + "+")
 
-        for i, spec in enumerate(self.stage_specs):
-            pore = spec['pore_nm']
-            if pore >= 1000:
-                pore_str = f"{pore/1000:.0f} μm"
-            else:
-                pore_str = f"{pore:.0f} nm"
+        for i, spec in enumerate(self.zone_specs):
+            lmin, lmax = spec['emission_range_nm']
+            lambda_str = f"{lmin:.0f}-{lmax:.0f}"
 
-            if spec['is_qdot_stage']:
-                lmin, lmax = spec['expected_lambda_range_nm']
-                lambda_str = f"{lmin:.0f}-{lmax:.0f}"
-                tipo = "QDots + PL"
-            else:
-                lambda_str = "N/A"
-                tipo = "Filtrado"
+            top_state = self.top_port_states[i].upper()
+            bot_state = self.bottom_port_states[i].upper()
 
-            valve_str = self.valve_states[i].value.upper()
-            print(f"  │  {i+1:<8}{pore_str:<12}{tipo:<18}{lambda_str:<16}{valve_str:<12}│")
+            print(f"  |  {i+1:<6}{spec['led_wavelength_nm']:<10.0f}"
+                  f"{spec['name']:<28}{lambda_str:<16}{top_state:<8}{bot_state:<8}|")
 
-        print("  └" + "─" * 66 + "┘")
+        print("  +" + "-" * 76 + "+")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -635,26 +603,34 @@ if __name__ == "__main__":
     simulate_sensor_calibration()
 
     # ═══════════════════════════════════════════════════════════════
-    #  DEMO DEL CLASIFICADOR DE LABERINTO
+    #  DEMO DEL CLASIFICADOR POR FLOTABILIDAD OPTICA
     # ═══════════════════════════════════════════════════════════════
     print("\n\n" + "=" * 70)
-    print("  CLASIFICADOR DE LABERINTO - DEMO")
+    print("  CLASIFICADOR POR FLOTABILIDAD OPTICA - DEMO")
     print("=" * 70)
 
     classifier = ClassifierController(reactor_controller=controller)
     classifier.print_classifier_status()
 
-    # Simular lecturas de fluorescencia por etapa
-    print("\n  Simulación de lecturas por etapa:")
-    stage_readings = [
-        (0, 0.0, 0.05, 0.0),    # Etapa 1: debris, sin fluorescencia
-        (1, 0.0, 0.03, 0.0),    # Etapa 2: agregados, sin fluorescencia
-        (2, 620, 0.65, 48),      # Etapa 3: QDots rojos (d~3.8nm → 620nm)
-        (3, 480, 0.88, 36),      # Etapa 4: QDots azules (d~2.9nm → 480nm) ← OBJETIVO
-        (4, 400, 0.72, 38),      # Etapa 5: QDots UV (d~2.0nm → 400nm)
+    # Simular lecturas de sensores por zona
+    # Cada zona tiene sensor arriba (QDots excitados) y abajo (debris)
+    print("\n  Simulación de lecturas por zona:")
+    print("  (top_wl, top_I, bottom_wl, bottom_I, fwhm)")
+    zone_readings = [
+        # Zona 1 (LED 520nm): QDots rojos suben, debris baja
+        (620, 0.65, 0, 0.05, 42),
+        # Zona 2 (LED 405nm): QDots azules suben, algunos QDots no capturados abajo
+        (480, 0.88, 480, 0.15, 36),
+        # Zona 3 (LED 365nm): QDots UV suben, debris baja
+        (400, 0.72, 0, 0.03, 38),
     ]
 
-    for stage_idx, wl, intensity, fwhm in stage_readings:
-        result = classifier.process_stage_reading(stage_idx, wl, intensity, fwhm)
-        print(f"\n    Etapa {stage_idx + 1}: {result['reason']}")
-        print(f"      → Acción: {result['action']}, λ={wl}nm, I={intensity}")
+    for zone_idx, reading in enumerate(zone_readings):
+        top_wl, top_I, bottom_wl, bottom_I, fwhm = reading
+        result = classifier.process_zone_reading(
+            zone_idx, top_wl, top_I, bottom_wl, bottom_I, fwhm)
+        print(f"\n    Zona {zone_idx + 1} (LED {result['led_wavelength_nm']}nm):")
+        print(f"      Arriba: {result['top_reason']}")
+        print(f"      Abajo:  {result['bottom_reason']}")
+        if result['led_power_adjustment'] != 1.0:
+            print(f"      -> Ajustar potencia LED: x{result['led_power_adjustment']:.1f}")
